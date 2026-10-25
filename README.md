@@ -1,61 +1,79 @@
-# 🎫 AI Ticket Bot
+# AI Ticket Bot — Full Discord Management
 
-Fully AI-powered Discord ticket system with advanced management features.
+Extremely complete ticket system. Everything is configured from Discord.
 
-## Features
-
-- **Multi-category panel** (General, Technical, Billing, Report, Other)
-- **AI auto-replies** inside every ticket
-- **Transcripts** (button + command + auto on close)
-- **Log channel** for opened / closed tickets
-- **Transcript channel** for archives
-- **Staff role** support
-- **Claim / Rename / Add / Remove** users
-- **Open tickets list** + stats
-- Everything configurable from Discord (`*config`)
-
-## Commands
-
-### Users
-| Command | Description |
-|---------|-------------|
-| `*close [reason]` | Close the ticket |
-| `*add @user` | Add someone to the ticket |
-| `*remove @user` | Remove someone |
-| `*transcript` | Generate transcript |
-
-### Staff
-| Command | Description |
-|---------|-------------|
-| `*claim` | Claim the ticket |
-| `*rename <name>` | Rename the ticket |
-| `*tickets` | List open tickets |
-| `*stats` | Ticket statistics |
-
-### Admin
-| Command | Description |
-|---------|-------------|
-| `*panel` / `*setup` | Send the category panel |
-| `*config` | Configure log channel, role, etc. |
-| `*help` | Show all commands |
-
-## Railway Variables
+## Quick start
 
 ```
-DISCORD_TOKEN=...
-OPENAI_API_KEY=gsk_...
+*staff add @SupportRole
+*staff add @Moderator
+*channel set #staff-requests
+*config log #ticket-logs
+*config transcripts #transcripts
+*panel
+```
+
+## Staff management
+
+```
+*staff list
+*staff add @user
+*staff add @role
+*staff remove @user
+*staff remove @role
+*staff role set @role
+*staff role add @role
+*staff role remove @role
+```
+
+Staff users and roles can see every ticket and use staff commands.
+
+## Categories
+
+```
+*category list
+*category add vip | VIP Support | ⭐ | Priority support
+*category remove vip
+```
+
+## Config
+
+```
+*config show
+*config log #channel
+*config transcripts #channel
+*config limit 2
+*config autoclose 48
+*config welcome Hello {user}! Category: {category}
+*config panel Select a category to open a ticket.
+*channel set #staff-channel
+```
+
+## Blacklist
+
+```
+*blacklist add @user
+*blacklist remove @user
+*blacklist list
+```
+
+## AI Prompt
+
+```
+*prompt show
+*prompt set <text>
+*prompt set   (+ attach .txt)
+*prompt add <line>
+*prompt reset
+```
+
+## Railway variables
+
+```
+DISCORD_TOKEN=
+OPENAI_API_KEY=
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
 AI_MODEL=openai/gpt-oss-20b
 ```
 
-## Quick Setup
-
-1. Deploy on Railway
-2. In Discord: `*config log #your-log-channel`
-3. `*config transcripts #your-transcript-channel`
-4. `*config role @Support` (optional)
-5. `*panel` in the channel where users should open tickets
-
----
-
-100% manageable from Discord.
+Optional: `AI_SYSTEM_PROMPT` (overridden by `*prompt set`).
