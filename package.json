@@ -1,11 +1,14 @@
 {
   "name": "ai-ticket-bot",
   "version": "1.0.0",
-  "description": "Bot Discord de tickets entièrement géré par IA - plus besoin de staff",
+  "description": "Bot Discord de tickets enti\u00e8rement g\u00e9r\u00e9 par IA - plus besoin de staff",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["discord", "ticket", "bot", "ai", "support"],
   "author": "paulcazelles5",
