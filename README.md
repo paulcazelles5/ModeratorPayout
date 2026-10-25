@@ -1,62 +1,62 @@
 # 🎫 AI Ticket Bot
 
-Bot Discord de **tickets entièrement géré par IA**.  
-Plus besoin de staff : l'IA répond automatiquement aux utilisateurs dans leurs tickets.
+Fully AI-powered Discord ticket bot.  
+No staff needed — the AI handles support tickets automatically.
 
-## Fonctionnalités
+## Features
 
-- Panneau de tickets avec bouton
-- Création automatique d'un salon privé par ticket
-- Réponses IA en temps réel (Groq / OpenAI / xAI / tout compatible)
-- Bouton + commande `/close` pour fermer
-- Transcript envoyé en MP à la fermeture
+- Ticket panel with button
+- Private channel created per ticket
+- Real-time AI responses (Groq / OpenAI / any compatible API)
+- Prefix commands (`*`)
+- Close button + `*close` command
+- Transcript sent in DM when ticket is closed
 
-## Déploiement sur Railway (recommandé)
+## Commands
 
-1. Va sur [railway.app](https://railway.app) et connecte ton compte GitHub
-2. Clique sur **New Project** → **Deploy from GitHub repo**
-3. Sélectionne `paulcazelles5/ModeratorPayout`
-4. Une fois le service créé, va dans l'onglet **Variables** et ajoute les variables ci-dessous
-5. Railway déploie automatiquement. Le bot se connecte dès que les variables sont bonnes.
+| Command | Description |
+|---------|-------------|
+| `*setup` | Send the ticket panel (Admin only) |
+| `*close` | Close the current ticket |
+| `*help` | Show available commands |
 
-### Variables à définir sur Railway
+## Deploy on Railway
 
-| Variable | Exemple / Valeur |
-|----------|------------------|
-| `DISCORD_TOKEN` | Ton token bot Discord |
-| `CLIENT_ID` | L'Application ID du bot |
-| `GUILD_ID` | L'ID de ton serveur Discord |
-| `OPENAI_API_KEY` | Ta clé Groq (`gsk_...`) |
+1. Go to [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo**
+2. Select `paulcazelles5/ModeratorPayout`
+3. Add the variables below in the **Variables** tab
+4. Deploy
+
+### Environment Variables
+
+| Variable | Value |
+|----------|-------|
+| `DISCORD_TOKEN` | Your Discord bot token |
+| `OPENAI_API_KEY` | Your Groq key (`gsk_...`) |
 | `OPENAI_BASE_URL` | `https://api.groq.com/openai/v1` |
 | `AI_MODEL` | `llama-3.3-70b-versatile` |
-| `AI_SYSTEM_PROMPT` | (optionnel) Ton prompt personnalisé |
+| `AI_SYSTEM_PROMPT` | (optional) Custom system prompt |
 
-> **Important** : Active les intents **Message Content Intent** et **Server Members Intent** sur le [Developer Portal](https://discord.com/developers/applications).
+> **Important**: Enable **Message Content Intent** and **Server Members Intent** in the [Discord Developer Portal](https://discord.com/developers/applications).
 
-## Installation locale
+## Local Setup
 
 ```bash
 git clone https://github.com/paulcazelles5/ModeratorPayout.git
 cd ModeratorPayout
 npm install
 cp .env.example .env
-# Édite .env avec tes valeurs
+# Edit .env
 npm start
 ```
 
-## Utilisation
+## Usage
 
-1. Dans un salon admin → `/setup-tickets`
-2. Les utilisateurs cliquent sur **Ouvrir un ticket**
-3. L'IA répond automatiquement
-
-## Commandes
-
-| Commande | Description |
-|----------|-------------|
-| `/setup-tickets` | Envoie le panneau de tickets |
-| `/close` | Ferme le ticket actuel |
+1. In any channel → `*setup`
+2. Users click **Open a Ticket**
+3. AI responds automatically
+4. Close with the button or `*close`
 
 ---
 
-Fait pour un support 100 % automatisé.
+100% automated support.

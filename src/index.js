@@ -9,32 +9,27 @@ const {
   ButtonStyle,
   ChannelType,
   PermissionFlagsBits,
-  SlashCommandBuilder,
-  REST,
-  Routes,
   AttachmentBuilder,
 } = require('discord.js');
 const OpenAI = require('openai');
-const fs = require('fs');
-const path = require('path');
 
 // ==================== CONFIG ====================
 const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-4o-mini';
+const AI_MODEL = process.env.AI_MODEL || 'llama-3.3-70b-versatile';
+const PREFIX = '*';
+
 const SYSTEM_PROMPT =
   process.env.AI_SYSTEM_PROMPT ||
-  `Tu es un assistant de support professionnel et amical. Tu réponds clairement, de façon concise et utile. Si tu ne peux pas résoudre le problème, propose des solutions alternatives. Réponds toujours en français sauf si l'utilisateur écrit dans une autre langue.`;
+  `You are a professional and friendly support assistant. You answer clearly, concisely and helpfully. If you cannot solve the problem, suggest alternative solutions. Always reply in the same language the user is writing in.`;
 
-if (!TOKEN || !CLIENT_ID || !GUILD_ID || !OPENAI_API_KEY) {
-  console.error('❌ Variables manquantes dans .env (DISCORD_TOKEN, CLIENT_ID, GUILD_ID, OPENAI_API_KEY)');
+if (!TOKEN || !OPENAI_API_KEY) {
+  console.error('❌ Missing environment variables (DISCORD_TOKEN, OPENAI_API_KEY)');
   process.exit(1);
 }
 
-// ==================== CLIENTS ====================
+// ==================== CLIENT ====================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -50,49 +45,21 @@ const openai = new OpenAI({
   baseURL: OPENAI_BASE_URL,
 });
 
-// Mémoire des conversations par channel (simple, en RAM)
+// Conversation memory per channel
 const conversations = new Map(); // channelId -> [{role, content}]
-
-// ==================== SLASH COMMANDS ====================
-const commands = [
-  new SlashCommandBuilder()
-    .setName('setup-tickets')
-    .setDescription('Envoie le panneau de tickets dans ce salon')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('close')
-    .setDescription('Ferme le ticket actuel'),
-].map((cmd) => cmd.toJSON());
-
-// ==================== REGISTER COMMANDS ====================
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-  try {
-    console.log('🔄 Enregistrement des commandes slash...');
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: commands,
-    });
-    console.log('✅ Commandes enregistrées !');
-  } catch (err) {
-    console.error('Erreur enregistrement commandes:', err);
-  }
-}
 
 // ==================== AI RESPONSE ====================
 async function getAIResponse(channelId, userMessage, username) {
   if (!conversations.has(channelId)) {
-    conversations.set(channelId, [
-      { role: 'system', content: SYSTEM_PROMPT },
-    ]);
+    conversations.set(channelId, [{ role: 'system', content: SYSTEM_PROMPT }]);
   }
 
   const history = conversations.get(channelId);
   history.push({ role: 'user', content: `[${username}]: ${userMessage}` });
 
-  // Limite l'historique pour ne pas exploser le contexte
+  // Keep history reasonable
   if (history.length > 30) {
-    history.splice(1, history.length - 25); // garde system + derniers messages
+    history.splice(1, history.length - 25);
   }
 
   try {
@@ -107,17 +74,16 @@ async function getAIResponse(channelId, userMessage, username) {
     history.push({ role: 'assistant', content: reply });
     return reply;
   } catch (err) {
-    console.error('Erreur OpenAI:', err.message);
-    return "Désolé, je rencontre un problème technique pour le moment. Réessaie dans quelques instants.";
+    console.error('AI Error:', err.message);
+    return 'Sorry, I am experiencing a technical issue right now. Please try again in a moment.';
   }
 }
 
 // ==================== CREATE TICKET ====================
-async function createTicket(interaction) {
-  const guild = interaction.guild;
-  const user = interaction.user;
+async function createTicket(interactionOrMessage, user) {
+  const guild = interactionOrMessage.guild;
 
-  // Vérifie si l'utilisateur a déjà un ticket ouvert
+  // Check if user already has an open ticket
   const existing = guild.channels.cache.find(
     (c) =>
       c.name === `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}` &&
@@ -125,15 +91,19 @@ async function createTicket(interaction) {
   );
 
   if (existing) {
-    return interaction.reply({
-      content: `Tu as déjà un ticket ouvert : ${existing}`,
-      ephemeral: true,
-    });
+    const msg = `You already have an open ticket: ${existing}`;
+    if (interactionOrMessage.reply) {
+      return interactionOrMessage.reply({ content: msg, ephemeral: true });
+    }
+    return interactionOrMessage.channel.send(msg);
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  // Defer if it's a button interaction
+  if (interactionOrMessage.deferReply) {
+    await interactionOrMessage.deferReply({ ephemeral: true });
+  }
 
-  // Cherche ou crée la catégorie "Tickets"
+  // Find or create "Tickets" category
   let category = guild.channels.cache.find(
     (c) => c.name.toLowerCase() === 'tickets' && c.type === ChannelType.GuildCategory
   );
@@ -181,27 +151,25 @@ async function createTicket(interaction) {
         ],
       },
     ],
-    topic: `Ticket de ${user.tag} | ID: ${user.id}`,
+    topic: `Ticket of ${user.tag} | ID: ${user.id}`,
   });
 
-  // Initialise la conversation
-  conversations.set(channel.id, [
-    { role: 'system', content: SYSTEM_PROMPT },
-  ]);
+  // Init conversation
+  conversations.set(channel.id, [{ role: 'system', content: SYSTEM_PROMPT }]);
 
   const welcomeEmbed = new EmbedBuilder()
     .setColor(0x5865f2)
-    .setTitle('🎫 Ticket ouvert')
+    .setTitle('🎫 Ticket Opened')
     .setDescription(
-      `Bonjour ${user} !\n\nDécris ton problème ou ta question, je suis là pour t'aider.\n\nQuand tu auras fini, clique sur **Fermer le ticket**.`
+      `Hello ${user}!\n\nPlease describe your issue or question. I'm here to help.\n\nWhen you're done, click **Close Ticket** or type \`*close\`.`
     )
-    .setFooter({ text: 'Support IA • Réponse automatique' })
+    .setFooter({ text: 'AI Support • Automatic responses' })
     .setTimestamp();
 
   const closeRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('close_ticket')
-      .setLabel('Fermer le ticket')
+      .setLabel('Close Ticket')
       .setStyle(ButtonStyle.Danger)
       .setEmoji('🔒')
   );
@@ -212,19 +180,24 @@ async function createTicket(interaction) {
     components: [closeRow],
   });
 
-  await interaction.editReply({
-    content: `✅ Ton ticket a été créé : ${channel}`,
-  });
+  const successMsg = `✅ Your ticket has been created: ${channel}`;
+
+  if (interactionOrMessage.editReply) {
+    await interactionOrMessage.editReply({ content: successMsg });
+  } else if (interactionOrMessage.reply) {
+    await interactionOrMessage.reply({ content: successMsg, ephemeral: true });
+  } else {
+    await interactionOrMessage.channel.send(successMsg);
+  }
 }
 
 // ==================== CLOSE TICKET ====================
 async function closeTicket(channel, user) {
   if (!channel.name.startsWith('ticket-')) {
-    return channel.send('❌ Ce salon n'est pas un ticket.');
+    return channel.send('❌ This channel is not a ticket.');
   }
 
-  // Génère un petit transcript
-  let transcript = `Transcript du ticket ${channel.name}\nFermé par : ${user.tag}\nDate : ${new Date().toLocaleString('fr-FR')}\n\n`;
+  let transcript = `Ticket Transcript: ${channel.name}\nClosed by: ${user.tag}\nDate: ${new Date().toUTCString()}\n\n`;
 
   try {
     const messages = await channel.messages.fetch({ limit: 100 });
@@ -233,13 +206,13 @@ async function closeTicket(channel, user) {
     for (const msg of sorted.values()) {
       if (msg.author.bot && !msg.embeds.length) continue;
       const content = msg.content || (msg.embeds[0]?.description ?? '[embed]');
-      transcript += `[${msg.createdAt.toLocaleString('fr-FR')}] ${msg.author.tag}: ${content}\n`;
+      transcript += `[${msg.createdAt.toUTCString()}] ${msg.author.tag}: ${content}\n`;
     }
-  } catch (e) {
-    transcript += '(Impossible de récupérer tous les messages)\n';
+  } catch {
+    transcript += '(Could not fetch all messages)\n';
   }
 
-  // Envoie le transcript en MP à l'utilisateur si possible
+  // Send transcript in DM
   try {
     const ownerId = channel.topic?.match(/ID: (\d+)/)?.[1];
     if (ownerId) {
@@ -249,107 +222,126 @@ async function closeTicket(channel, user) {
         const attachment = new AttachmentBuilder(buffer, {
           name: `transcript-${channel.name}.txt`,
         });
-        await member.send({
-          content: 'Voici le transcript de ton ticket :',
-          files: [attachment],
-        }).catch(() => {});
+        await member
+          .send({
+            content: 'Here is the transcript of your ticket:',
+            files: [attachment],
+          })
+          .catch(() => {});
       }
     }
   } catch {}
 
-  // Nettoie la mémoire
   conversations.delete(channel.id);
 
-  await channel.send('🔒 Fermeture du ticket dans 5 secondes...');
+  await channel.send('🔒 Closing ticket in 5 seconds...');
   setTimeout(() => {
     channel.delete().catch(() => {});
   }, 5000);
 }
 
 // ==================== EVENTS ====================
-client.once('ready', async () => {
-  console.log(`✅ Connecté en tant que ${client.user.tag}`);
-  await registerCommands();
+client.once('ready', () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`Prefix: ${PREFIX}`);
 });
 
+// Button interactions
 client.on('interactionCreate', async (interaction) => {
   try {
-    // Bouton "Ouvrir un ticket"
-    if (interaction.isButton() && interaction.customId === 'open_ticket') {
-      await createTicket(interaction);
+    if (!interaction.isButton()) return;
+
+    if (interaction.customId === 'open_ticket') {
+      await createTicket(interaction, interaction.user);
       return;
     }
 
-    // Bouton "Fermer le ticket"
-    if (interaction.isButton() && interaction.customId === 'close_ticket') {
+    if (interaction.customId === 'close_ticket') {
       await interaction.deferUpdate();
       await closeTicket(interaction.channel, interaction.user);
-      return;
-    }
-
-    // Slash commands
-    if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === 'setup-tickets') {
-        const embed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle('🎫 Support')
-          .setDescription(
-            'Besoin d\'aide ? Clique sur le bouton ci-dessous pour ouvrir un ticket.\n\nUn assistant IA te répondra automatiquement.'
-          )
-          .setFooter({ text: 'Support 100 % automatisé' });
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('open_ticket')
-            .setLabel('Ouvrir un ticket')
-            .setStyle(ButtonStyle.Primary)
-            .setEmoji('📩')
-        );
-
-        await interaction.channel.send({ embeds: [embed], components: [row] });
-        await interaction.reply({ content: '✅ Panneau de tickets envoyé !', ephemeral: true });
-      }
-
-      if (interaction.commandName === 'close') {
-        if (!interaction.channel.name.startsWith('ticket-')) {
-          return interaction.reply({
-            content: '❌ Cette commande ne peut être utilisée que dans un ticket.',
-            ephemeral: true,
-          });
-        }
-        await interaction.reply({ content: 'Fermeture en cours...', ephemeral: true });
-        await closeTicket(interaction.channel, interaction.user);
-      }
     }
   } catch (err) {
-    console.error('Erreur interaction:', err);
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({ content: 'Une erreur est survenue.', ephemeral: true }).catch(() => {});
-    } else {
-      await interaction.reply({ content: 'Une erreur est survenue.', ephemeral: true }).catch(() => {});
-    }
+    console.error('Interaction error:', err);
   }
 });
 
-// Messages dans les tickets → réponse IA
+// Prefix commands + AI responses
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
+  if (message.author.bot || !message.guild) return;
+
+  const content = message.content.trim();
+
+  // ===== PREFIX COMMANDS =====
+  if (content.startsWith(PREFIX)) {
+    const args = content.slice(PREFIX.length).trim().split(/\s+/);
+    const command = args.shift()?.toLowerCase();
+
+    // *setup → send ticket panel (Admin only)
+    if (command === 'setup') {
+      if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return message.reply('❌ You need Administrator permission to use this command.');
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('🎫 Support')
+        .setDescription(
+          'Need help? Click the button below to open a ticket.\n\nAn AI assistant will respond to you automatically.'
+        )
+        .setFooter({ text: '100% Automated Support' });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('open_ticket')
+          .setLabel('Open a Ticket')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('📩')
+      );
+
+      await message.channel.send({ embeds: [embed], components: [row] });
+      await message.reply('✅ Ticket panel sent!');
+      return;
+    }
+
+    // *close → close current ticket
+    if (command === 'close') {
+      if (!message.channel.name.startsWith('ticket-')) {
+        return message.reply('❌ This command can only be used inside a ticket.');
+      }
+      await closeTicket(message.channel, message.author);
+      return;
+    }
+
+    // *help
+    if (command === 'help') {
+      const helpEmbed = new EmbedBuilder()
+        .setColor(0x5865f2)
+        .setTitle('🎫 Ticket Bot Commands')
+        .setDescription(
+          `**${PREFIX}setup** — Send the ticket panel (Admin only)\n` +
+            `**${PREFIX}close** — Close the current ticket\n` +
+            `**${PREFIX}help** — Show this message`
+        )
+        .setFooter({ text: 'AI-powered support' });
+
+      return message.reply({ embeds: [helpEmbed] });
+    }
+
+    return; // Unknown command, ignore
+  }
+
+  // ===== AI RESPONSE IN TICKETS =====
   if (!message.channel.name?.startsWith('ticket-')) return;
+  if (!content || content.length < 2) return;
 
-  // Ignore les messages trop courts
-  if (!message.content || message.content.trim().length < 2) return;
-
-  // Indicateur de frappe
   await message.channel.sendTyping().catch(() => {});
 
   const reply = await getAIResponse(
     message.channel.id,
-    message.content,
+    content,
     message.author.username
   );
 
-  // Découpe si trop long
   if (reply.length > 2000) {
     const chunks = reply.match(/[\s\S]{1,1900}/g) || [reply];
     for (const chunk of chunks) {
