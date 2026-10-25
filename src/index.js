@@ -41,50 +41,46 @@ function defaultData() {
     staffRoleIds: [],
     blacklist: [],
     jailRoleId: null,
-    mutedRoleId: null,
+    quarantineRoleId: null,
     categories: [
-      { id: 'general', label: 'General Support', emoji: '💬', description: 'General questions' },
-      { id: 'technical', label: 'Technical', emoji: '🛠️', description: 'Bugs and errors' },
-      { id: 'billing', label: 'Billing', emoji: '💳', description: 'Payments' },
-      { id: 'report', label: 'Report', emoji: '🚨', description: 'Report a user' },
-      { id: 'other', label: 'Other', emoji: '📌', description: 'Anything else' },
+      { id: 'general', label: 'General Support', emoji: '💬', description: 'General questions', form: true },
+      { id: 'technical', label: 'Technical', emoji: '🛠️', description: 'Bugs and errors', form: true },
+      { id: 'billing', label: 'Billing', emoji: '💳', description: 'Payments', form: true },
+      { id: 'report', label: 'Report', emoji: '🚨', description: 'Report a user', form: true },
+      { id: 'other', label: 'Other', emoji: '📌', description: 'Anything else', form: false },
     ],
     openTickets: {},
+    closedHistory: [],
     warnings: {},
     jails: {},
-    giveaways: {},
     notes: {},
-    welcomeMessage: 'Hello {user}!\n\n**Category:** {category}\n\nDescribe your issue.',
+    tags: {},
+    giveaways: {},
+    welcomeMessage: 'Hello {user}!\n\n**Category:** {category}\n**Priority:** {priority}\n\n{form}\n\nAn AI assistant will help you. Staff can join anytime.\n\n`*close` · `*escalate` · `*priority` · `*transcript`',
     panelTitle: 'Support Tickets',
-    panelDescription: 'Select a category to open a ticket.',
-    antiRaid: {
-      enabled: true,
-      joins: 8,
-      seconds: 10,
-      action: 'kick', // kick | alert | lockdown
-      alertChannelId: null,
-    },
+    panelDescription: 'Select a category to open a private ticket.',
+    requireForm: true,
+    allowUserClose: true,
+    allowReopen: true,
+    reopenHours: 24,
+    ratingEnabled: true,
+    antiRaid: { enabled: true, joins: 8, seconds: 10, action: 'kick' },
     antiNuke: {
       enabled: true,
       channelDeletes: 3,
       roleDeletes: 3,
       bans: 5,
       kicks: 8,
+      webhooks: 3,
+      botAdds: 2,
       seconds: 15,
-      action: 'strip', // strip | alert | ban
+      action: 'quarantine', // quarantine | strip | ban | kick | alert
       exemptUserIds: [],
       exemptRoleIds: [],
+      logChannelId: null,
     },
     raidMode: false,
-    automod: {
-      antiLink: false,
-      antiInvite: false,
-      antiSpam: false,
-      spamMessages: 5,
-      spamSeconds: 5,
-      maxMentions: 0,
-      blockedWords: [],
-    },
+    automod: { antiLink: false, antiInvite: false, antiSpam: false, spamMessages: 5, spamSeconds: 5, maxMentions: 0, blockedWords: [] },
   };
 }
 
@@ -94,8 +90,7 @@ function loadData() {
       const loaded = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
       const base = defaultData();
       return {
-        ...base,
-        ...loaded,
+        ...base, ...loaded,
         antiRaid: { ...base.antiRaid, ...(loaded.antiRaid || {}) },
         antiNuke: { ...base.antiNuke, ...(loaded.antiNuke || {}) },
         automod: { ...base.automod, ...(loaded.automod || {}) },
@@ -107,7 +102,6 @@ function loadData() {
 function saveData() {
   try { fs.writeFileSync(DATA_PATH, JSON.stringify(data, null, 2)); } catch (e) { console.error(e.message); }
 }
-
 let data = loadData();
 
 function getActivePrompt() {
@@ -126,7 +120,7 @@ function refreshAllConversations() {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildModeration, GatewayIntentBits.GuildWebhooks,
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
@@ -136,6 +130,14 @@ const conversations = new Map();
 const recentJoins = new Map();
 const recentDeletes = new Map();
 const spamMap = new Map();
+const pendingForms = new Map(); // userId -> categoryId
+
+const PRIORITY = {
+  low: { label: 'Low', emoji: '🟢', color: 0x57f287 },
+  medium: { label: 'Medium', emoji: '🟡', color: 0xfee75c },
+  high: { label: 'High', emoji: '🟠', color: 0xfaa61a },
+  urgent: { label: 'Urgent', emoji: '🔴', color: 0xed4245 },
+};
 
 function isAdmin(m) { return m?.permissions?.has(PermissionFlagsBits.Administrator); }
 function isStaff(m) {
@@ -158,9 +160,23 @@ function isNukeExempt(member) {
   if (data.antiNuke.exemptRoleIds?.some((id) => member.roles.cache.has(id))) return true;
   return false;
 }
+function staffOverwrites() {
+  const list = [];
+  for (const id of data.staffUserIds || [])
+    list.push({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+  for (const id of data.staffRoleIds || [])
+    list.push({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+  return list;
+}
 
 async function modLog(guild, embed) {
   const id = data.modLogChannelId || data.logChannelId;
+  if (!id) return;
+  const ch = guild.channels.cache.get(id);
+  if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+}
+async function nukeLog(guild, embed) {
+  const id = data.antiNuke.logChannelId || data.modLogChannelId || data.logChannelId;
   if (!id) return;
   const ch = guild.channels.cache.get(id);
   if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
@@ -182,6 +198,7 @@ async function escalateToStaff(guild, ticketChannel, user, reason) {
   const embed = new EmbedBuilder().setColor(0xfaa61a).setTitle('Staff Assistance').addFields(
     { name: 'Ticket', value: info ? `#${info.number}` : ticketChannel.name, inline: true },
     { name: 'User', value: `${user.tag}`, inline: true },
+    { name: 'Priority', value: PRIORITY[info?.priority || 'medium']?.label || 'Medium', inline: true },
     { name: 'Channel', value: `${ticketChannel}`, inline: true },
     { name: 'Reason', value: reason || '—', inline: false }
   ).setTimestamp();
@@ -205,9 +222,8 @@ function formatDuration(ms) {
   if (ms < 86400000) return `${Math.round(ms / 3600000)}h`;
   return `${Math.round(ms / 86400000)}d`;
 }
-
 async function generateTranscript(channel) {
-  let text = `TRANSCRIPT ${channel.name} ${new Date().toUTCString()}\n\n`;
+  let text = `TRANSCRIPT ${channel.name}\n${new Date().toUTCString()}\n\n`;
   try {
     const messages = await channel.messages.fetch({ limit: 100 });
     const sorted = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
@@ -229,14 +245,6 @@ function fetchTextAttachment(url) {
       res.on('end', () => resolve(body));
     }).on('error', reject);
   });
-}
-function staffOverwrites() {
-  const list = [];
-  for (const id of data.staffUserIds || [])
-    list.push({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-  for (const id of data.staffRoleIds || [])
-    list.push({ id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-  return list;
 }
 
 async function getAIResponse(channelId, userMessage, username) {
@@ -263,107 +271,61 @@ function parseEscalate(reply) {
   return { reason: match[1].trim(), clean: reply.replace(/\[\[ESCALATE:\s*.+?\]\]/gi, '').trim() };
 }
 
-// ─── HELP DROPDOWN CONTENT ─────────────────────────────────
+// ─── HELP ──────────────────────────────────────────────────
 const HELP_SECTIONS = {
   user: {
-    label: 'User commands',
-    emoji: '👤',
-    description: 'Commands everyone can use',
-    text:
-      '`*help` — This menu\n' +
-      '`*close [reason]` — Close your ticket\n' +
-      '`*escalate [reason]` — Request staff\n' +
-      '`*add @user` · `*remove @user` — Ticket members\n' +
-      '`*transcript` — Ticket transcript\n' +
-      '`*warnings [@user]` — View warnings',
+    label: 'User', emoji: '👤', description: 'Everyone',
+    text: '`*help` · `*close` · `*escalate` · `*add` · `*remove` · `*transcript` · `*priority` · `*reopen` · `*warnings`',
   },
   moderation: {
-    label: 'Moderation',
-    emoji: '🛡️',
-    description: 'Ban, mute, jail, purge…',
-    staff: true,
-    text:
-      '`*ban @user [reason]` · `*unban <id>`\n' +
-      '`*kick @user [reason]`\n' +
-      '`*timeout @user 1h [reason]` · `*untimeout @user`\n' +
-      '`*warn @user [reason]` · `*warnings @user` · `*clearwarns @user`\n' +
-      '`*jail @user [reason]` · `*unjail @user`\n' +
-      '`*purge <1-100>` · `*slowmode <sec>`\n' +
-      '`*lock` · `*unlock` · `*nick @user [name]`\n' +
-      '`*note @user <text>` · `*notes @user`\n' +
-      '`*softban @user` · `*vmute @user` · `*vunmute @user`',
+    label: 'Moderation', emoji: '🛡️', description: 'Mod tools', staff: true,
+    text: '`*ban` `*softban` `*unban` `*kick` `*timeout` `*untimeout` `*warn` `*warnings` `*clearwarns` `*jail` `*unjail` `*purge` `*slowmode` `*lock` `*unlock` `*nick` `*note` `*notes` `*vmute` `*vunmute`',
   },
   protection: {
-    label: 'Anti-raid / Anti-nuke',
-    emoji: '🚨',
-    description: 'Raid mode, lockdown, protection',
-    staff: true,
-    text:
-      '`*raidmode on|off|status`\n' +
-      '`*lockdown` · `*lockdown off`\n' +
-      '`*antiraid` — View / configure anti-raid\n' +
-      '`*antinuke` — View / configure anti-nuke',
-  },
-  giveaway: {
-    label: 'Giveaways',
-    emoji: '🎉',
-    description: 'Create and manage giveaways',
-    staff: true,
-    text:
-      '`*giveaway create duration | winners | prize | @req | bl:@role`\n' +
-      '`*giveaway list` · `*giveaway end <id>` · `*giveaway reroll <id>`\n\n' +
-      'Example: `*giveaway create 24h | 1 | Nitro | @Member | bl:@Muted`',
+    label: 'Protection', emoji: '🚨', description: 'Anti-raid / nuke', staff: true,
+    text: '`*raidmode` `*lockdown` `*antiraid` `*antinuke` `*automod`',
   },
   tickets: {
-    label: 'Tickets (staff)',
-    emoji: '🎫',
-    description: 'Staff ticket tools',
-    staff: true,
-    text:
-      '`*claim` · `*tickets` · `*stats`\n' +
-      '`*blacklist add|remove|list`',
+    label: 'Tickets staff', emoji: '🎫', description: 'Ticket management', staff: true,
+    text: '`*claim` `*unclaim` `*tickets` `*priority` `*move` `*tag` `*tags` `*closeticket` `*stats` `*blacklist`',
+  },
+  giveaway: {
+    label: 'Giveaways', emoji: '🎉', description: 'Giveaways', staff: true,
+    text: '`*giveaway create duration | winners | prize | @req | bl:@role`\n`*giveaway list|end|reroll`',
   },
   admin: {
-    label: 'Admin / Config',
-    emoji: '⚙️',
-    description: 'Full server configuration',
-    admin: true,
-    text:
-      '`*panel` — Publish ticket panel\n' +
-      '`*staff list|add|remove`\n' +
-      '`*channel set #channel`\n' +
-      '`*config show|log|modlog|jail|limit|…`\n' +
-      '`*category list|add|remove`\n' +
-      '`*prompt show|set|add|reset`\n' +
-      '`*automod` — Link/invite/spam filters\n' +
-      '`*antiraid` · `*antinuke` — Full protection config',
+    label: 'Admin', emoji: '⚙️', description: 'Configuration', admin: true,
+    text: '`*panel` `*staff` `*channel set` `*config` `*category` `*prompt` `*antiraid` `*antinuke` `*automod`',
   },
 };
-
 function helpOptionsFor(member) {
-  const opts = [];
-  for (const [id, sec] of Object.entries(HELP_SECTIONS)) {
-    if (sec.admin && !isAdmin(member)) continue;
-    if (sec.staff && !isStaff(member) && !isMod(member)) continue;
-    opts.push({ label: sec.label, description: sec.description.slice(0, 100), value: id, emoji: sec.emoji });
-  }
-  return opts;
+  return Object.entries(HELP_SECTIONS)
+    .filter(([, sec]) => {
+      if (sec.admin && !isAdmin(member)) return false;
+      if (sec.staff && !isStaff(member) && !isMod(member)) return false;
+      return true;
+    })
+    .map(([id, sec]) => ({ label: sec.label, description: sec.description, value: id, emoji: sec.emoji }));
 }
 
-// ─── TICKETS ───────────────────────────────────────────────
-async function createTicket(guild, user, categoryId, interaction) {
+// ─── CREATE TICKET ─────────────────────────────────────────
+async function createTicket(guild, user, categoryId, interaction, formData = {}) {
   if (isBlacklisted(user.id)) {
     const msg = 'You are blacklisted from opening tickets.';
     return interaction.deferred || interaction.replied ? interaction.editReply({ content: msg }) : interaction.reply({ content: msg, ephemeral: true });
   }
   const max = data.maxTicketsPerUser || 1;
   if (countUserTickets(user.id) >= max) {
-    const msg = `You already have ${max} open ticket(s).`;
+    const msg = `You already have ${max} open ticket(s). Close one first or use \`*reopen\` if available.`;
     return interaction.deferred || interaction.replied ? interaction.editReply({ content: msg }) : interaction.reply({ content: msg, ephemeral: true });
   }
+
   const category = data.categories.find((c) => c.id === categoryId) || data.categories[0];
   data.ticketCounter += 1;
   const num = data.ticketCounter;
+  const priority = formData.priority || 'medium';
+  const pInfo = PRIORITY[priority] || PRIORITY.medium;
+
   let parent = guild.channels.cache.find((c) => c.name.toLowerCase() === 'tickets' && c.type === ChannelType.GuildCategory);
   if (!parent) {
     parent = await guild.channels.create({
@@ -371,62 +333,189 @@ async function createTicket(guild, user, categoryId, interaction) {
       permissionOverwrites: [{ id: guild.id, deny: [PermissionFlagsBits.ViewChannel] }],
     });
   }
+
   const overwrites = [
     { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
     { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
     { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages] },
     ...staffOverwrites(),
   ];
+
   const channel = await guild.channels.create({
     name: `ticket-${String(num).padStart(4, '0')}`,
-    type: ChannelType.GuildText, parent: parent.id,
-    topic: `Ticket #${num} | ${user.tag} | ${category.label} | ID: ${user.id}`,
+    type: ChannelType.GuildText,
+    parent: parent.id,
+    topic: `Ticket #${num} | ${user.tag} | ${category.label} | ${pInfo.label} | ID: ${user.id}`,
     permissionOverwrites: overwrites,
   });
-  data.openTickets[channel.id] = { number: num, userId: user.id, category: category.id, categoryLabel: category.label, createdAt: Date.now(), claimedBy: null };
+
+  let formBlock = '';
+  if (formData.subject) formBlock += `**Subject:** ${formData.subject}\n`;
+  if (formData.description) formBlock += `**Details:** ${formData.description}\n`;
+
+  data.openTickets[channel.id] = {
+    number: num,
+    userId: user.id,
+    category: category.id,
+    categoryLabel: category.label,
+    priority,
+    createdAt: Date.now(),
+    claimedBy: null,
+    subject: formData.subject || null,
+    tags: [],
+  };
   saveData();
   conversations.set(channel.id, [{ role: 'system', content: getActivePrompt() }]);
+
+  // Seed AI with form context
+  if (formData.subject || formData.description) {
+    const history = conversations.get(channel.id);
+    history.push({
+      role: 'user',
+      content: `[${user.username}]: [Ticket form] Subject: ${formData.subject || 'N/A'}\nDetails: ${formData.description || 'N/A'}`,
+    });
+  }
+
   const welcome = (data.welcomeMessage || defaultData().welcomeMessage)
-    .replace(/\{user\}/g, `${user}`).replace(/\{category\}/g, category.label).replace(/\{number\}/g, String(num));
-  const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(`${category.emoji || '🎫'} Ticket #${num} — ${category.label}`).setDescription(welcome).setTimestamp();
-  const row = new ActionRowBuilder().addComponents(
+    .replace(/\{user\}/g, `${user}`)
+    .replace(/\{category\}/g, category.label)
+    .replace(/\{number\}/g, String(num))
+    .replace(/\{priority\}/g, `${pInfo.emoji} ${pInfo.label}`)
+    .replace(/\{form\}/g, formBlock || 'Describe your issue below.');
+
+  const embed = new EmbedBuilder()
+    .setColor(pInfo.color)
+    .setTitle(`${category.emoji || '🎫'} Ticket #${num} — ${category.label}`)
+    .setDescription(welcome)
+    .addFields(
+      { name: 'Priority', value: `${pInfo.emoji} ${pInfo.label}`, inline: true },
+      { name: 'Opened by', value: `${user}`, inline: true }
+    )
+    .setFooter({ text: 'AI Support' })
+    .setTimestamp();
+
+  const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('close_ticket').setLabel('Close').setStyle(ButtonStyle.Danger).setEmoji('🔒'),
     new ButtonBuilder().setCustomId('escalate_ticket').setLabel('Request Staff').setStyle(ButtonStyle.Primary).setEmoji('🆘'),
-    new ButtonBuilder().setCustomId('transcript_ticket').setLabel('Transcript').setStyle(ButtonStyle.Secondary).setEmoji('📄')
+    new ButtonBuilder().setCustomId('transcript_ticket').setLabel('Transcript').setStyle(ButtonStyle.Secondary).setEmoji('📄'),
+    new ButtonBuilder().setCustomId('priority_ticket').setLabel('Priority').setStyle(ButtonStyle.Secondary).setEmoji('⚡')
   );
-  await channel.send({ content: `${user}`, embeds: [embed], components: [row] });
-  await sendLog(guild, new EmbedBuilder().setColor(0x57f287).setTitle('Ticket Opened').addFields(
-    { name: 'Ticket', value: `#${num}`, inline: true }, { name: 'User', value: user.tag, inline: true },
-    { name: 'Category', value: category.label, inline: true }, { name: 'Channel', value: `${channel}`, inline: true }
+
+  await channel.send({ content: `${user}`, embeds: [embed], components: [row1] });
+
+  // Auto AI first reply if form provided
+  if (openai && (formData.subject || formData.description)) {
+    await channel.sendTyping().catch(() => {});
+    const raw = await getAIResponse(channel.id, `Subject: ${formData.subject || ''}\n${formData.description || ''}`, user.username);
+    const { clean, reason } = parseEscalate(raw);
+    if (clean) await channel.send(clean).catch(() => {});
+    if (reason) await escalateToStaff(guild, channel, user, reason);
+  }
+
+  await sendLog(guild, new EmbedBuilder().setColor(pInfo.color).setTitle('Ticket Opened').addFields(
+    { name: 'Ticket', value: `#${num}`, inline: true },
+    { name: 'User', value: user.tag, inline: true },
+    { name: 'Category', value: category.label, inline: true },
+    { name: 'Priority', value: pInfo.label, inline: true },
+    { name: 'Channel', value: `${channel}`, inline: true }
   ).setTimestamp());
+
   const ok = `Ticket created: ${channel}`;
   if (interaction.deferred || interaction.replied) await interaction.editReply({ content: ok });
   else await interaction.reply({ content: ok, ephemeral: true });
 }
 
-async function closeTicket(channel, user, reason = 'No reason provided') {
+async function closeTicket(channel, user, reason = 'No reason provided', options = {}) {
   const info = getTicketInfo(channel.id);
   if (!info && !channel.name.startsWith('ticket-')) return channel.send('Not a ticket channel.');
+
+  // Permission: user can close own ticket if allowed; staff always
+  const isOwner = info?.userId === user.id;
+  const member = channel.guild.members.cache.get(user.id) || await channel.guild.members.fetch(user.id).catch(() => null);
+  if (!isStaff(member) && !isMod(member) && !(isOwner && data.allowUserClose)) {
+    return channel.send('You cannot close this ticket.');
+  }
+
   const transcript = await generateTranscript(channel);
   const file = new AttachmentBuilder(Buffer.from(transcript, 'utf-8'), { name: `transcript-${info?.number || channel.name}.txt` });
+
+  // History
+  if (info) {
+    data.closedHistory = data.closedHistory || [];
+    data.closedHistory.unshift({
+      number: info.number,
+      userId: info.userId,
+      category: info.categoryLabel,
+      priority: info.priority,
+      closedBy: user.id,
+      reason,
+      closedAt: Date.now(),
+      claimedBy: info.claimedBy,
+    });
+    data.closedHistory = data.closedHistory.slice(0, 200);
+  }
+
   try {
     const ownerId = info?.userId || channel.topic?.match(/ID: (\d+)/)?.[1];
     if (ownerId) {
-      const member = await channel.guild.members.fetch(ownerId).catch(() => null);
-      if (member) await member.send({ content: `Ticket **#${info?.number || '?'}** closed.\nReason: ${reason}`, files: [file] }).catch(() => {});
+      const owner = await channel.guild.members.fetch(ownerId).catch(() => null);
+      if (owner) {
+        const dmPayload = { content: `Ticket **#${info?.number || '?'}** closed.\n**Reason:** ${reason}`, files: [file] };
+        if (data.ratingEnabled && !options.skipRating) {
+          const rateRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rate_${info?.number || 0}_1`).setLabel('1').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`rate_${info?.number || 0}_2`).setLabel('2').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`rate_${info?.number || 0}_3`).setLabel('3').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`rate_${info?.number || 0}_4`).setLabel('4').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`rate_${info?.number || 0}_5`).setLabel('5').setStyle(ButtonStyle.Success)
+          );
+          dmPayload.content += '\n\nRate this support (1-5):';
+          dmPayload.components = [rateRow];
+        }
+        await owner.send(dmPayload).catch(() => {});
+      }
     }
   } catch {}
+
   if (data.transcriptChannelId) {
     const tCh = channel.guild.channels.cache.get(data.transcriptChannelId);
-    if (tCh) await tCh.send({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle(`Transcript #${info?.number || '?'}`).addFields({ name: 'By', value: user.tag, inline: true }, { name: 'Reason', value: reason, inline: true })], files: [file] }).catch(() => {});
+    if (tCh) await tCh.send({
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle(`Transcript #${info?.number || '?'}`).addFields(
+        { name: 'By', value: user.tag, inline: true },
+        { name: 'Reason', value: reason, inline: true },
+        { name: 'Priority', value: PRIORITY[info?.priority || 'medium']?.label || '—', inline: true }
+      )],
+      files: [file],
+    }).catch(() => {});
   }
-  await sendLog(channel.guild, new EmbedBuilder().setColor(0xed4245).setTitle('Ticket Closed').addFields({ name: 'Ticket', value: `#${info?.number || '?'}`, inline: true }, { name: 'By', value: user.tag, inline: true }, { name: 'Reason', value: reason }));
-  delete data.openTickets[channel.id]; saveData(); conversations.delete(channel.id);
-  await channel.send(`Closed by **${user.tag}**. Reason: ${reason}\nDeleting in 5s...`);
+
+  await sendLog(channel.guild, new EmbedBuilder().setColor(0xed4245).setTitle('Ticket Closed').addFields(
+    { name: 'Ticket', value: `#${info?.number || '?'}`, inline: true },
+    { name: 'By', value: user.tag, inline: true },
+    { name: 'Reason', value: reason }
+  ));
+
+  delete data.openTickets[channel.id];
+  saveData();
+  conversations.delete(channel.id);
+  await channel.send(`Closed by **${user.tag}**.\nReason: ${reason}\nDeleting in 5s...`);
   setTimeout(() => channel.delete().catch(() => {}), 5000);
 }
 
-// ─── GIVEAWAY ──────────────────────────────────────────────
+async function updateTicketPriority(channel, priority, by) {
+  const info = getTicketInfo(channel.id);
+  if (!info) return false;
+  info.priority = priority;
+  saveData();
+  const p = PRIORITY[priority] || PRIORITY.medium;
+  try {
+    await channel.setTopic(`Ticket #${info.number} | priority:${p.label} | ID: ${info.userId}`);
+  } catch {}
+  await channel.send({ embeds: [new EmbedBuilder().setColor(p.color).setDescription(`${p.emoji} Priority set to **${p.label}** by ${by}`)] });
+  return true;
+}
+
+// ─── GIVEAWAY / NUKE HELPERS ───────────────────────────────
 function parseGiveawayArgs(raw) {
   const parts = raw.split('|').map((s) => s.trim()).filter(Boolean);
   if (parts.length < 3) return null;
@@ -442,12 +531,10 @@ function parseGiveawayArgs(raw) {
       blacklistRoles.push(...[...p.matchAll(/(\d{16,20})/g)].map((m) => m[1]));
       continue;
     }
-    const ids = [...p.matchAll(/(\d{16,20})/g)].map((m) => m[1]);
-    if (ids.length) requiredRoles.push(...ids);
+    requiredRoles.push(...[...p.matchAll(/(\d{16,20})/g)].map((m) => m[1]));
   }
   return { duration, winners, prize, requiredRoles, blacklistRoles };
 }
-
 async function endGiveaway(guild, gwId) {
   const gw = data.giveaways[gwId];
   if (!gw || gw.ended) return;
@@ -477,13 +564,41 @@ async function handleNukeAction(guild, executor, reason) {
   if (!executor || executor.id === client.user.id) return;
   const member = await guild.members.fetch(executor.id).catch(() => null);
   if (!member || isNukeExempt(member)) return;
-  const action = data.antiNuke.action || 'strip';
-  await modLog(guild, new EmbedBuilder().setColor(0xed4245).setTitle('ANTI-NUKE').setDescription(`**${executor.tag}** — ${reason}\nAction: **${action}**`).setTimestamp());
+  const action = data.antiNuke.action || 'quarantine';
+  await nukeLog(guild, new EmbedBuilder().setColor(0xed4245).setTitle('ANTI-NUKE TRIGGERED')
+    .setDescription(`**User:** ${executor.tag} (${executor.id})\n**Reason:** ${reason}\n**Action:** ${action}`).setTimestamp());
+
   try {
-    if (action === 'strip') await member.roles.set([]).catch(() => {});
-    else if (action === 'ban') await member.ban({ reason: `Anti-nuke: ${reason}` }).catch(() => {});
-    else if (action === 'kick') await member.kick(`Anti-nuke: ${reason}`).catch(() => {});
+    if (action === 'quarantine' && data.quarantineRoleId) {
+      await member.roles.set([data.quarantineRoleId], `Anti-nuke: ${reason}`);
+    } else if (action === 'strip' || (action === 'quarantine' && !data.quarantineRoleId)) {
+      await member.roles.set([], `Anti-nuke: ${reason}`);
+    } else if (action === 'ban') {
+      await member.ban({ reason: `Anti-nuke: ${reason}` });
+    } else if (action === 'kick') {
+      await member.kick(`Anti-nuke: ${reason}`);
+    }
+    // alert only = just log
+  } catch (e) {
+    await nukeLog(guild, new EmbedBuilder().setColor(0xed4245).setDescription(`Failed to punish ${executor.tag}: ${e.message}`));
+  }
+
+  // DM owner
+  try {
+    const owner = await guild.fetchOwner();
+    await owner.send(`**Anti-nuke** on **${guild.name}**\n${executor.tag} — ${reason}\nAction: ${action}`).catch(() => {});
   } catch {}
+}
+
+function trackNuke(guild, type) {
+  const gid = guild.id;
+  const now = Date.now();
+  if (!recentDeletes.has(gid)) recentDeletes.set(gid, { channels: [], roles: [], bans: [], kicks: [], webhooks: [], botAdds: [] });
+  const rec = recentDeletes.get(gid);
+  const window = (data.antiNuke.seconds || 15) * 1000;
+  rec[type] = (rec[type] || []).filter((t) => now - t < window);
+  rec[type].push(now);
+  return rec[type].length;
 }
 
 // ─── READY ─────────────────────────────────────────────────
@@ -504,13 +619,25 @@ client.once('ready', () => {
       if (Date.now() - t.createdAt < limit) continue;
       const g = client.guilds.cache.first();
       const ch = g?.channels.cache.get(cid);
-      if (ch) await closeTicket(ch, client.user, `Auto-closed after ${data.autoCloseHours}h`).catch(() => {});
+      if (ch) await closeTicket(ch, client.user, `Auto-closed after ${data.autoCloseHours}h`, { skipRating: true }).catch(() => {});
     }
   }, 15 * 60 * 1000);
 });
 
 // ─── ANTI-RAID ─────────────────────────────────────────────
 client.on('guildMemberAdd', async (member) => {
+  // Bot add tracking for anti-nuke
+  if (member.user.bot && data.antiNuke?.enabled) {
+    const count = trackNuke(member.guild, 'botAdds');
+    if (count >= (data.antiNuke.botAdds || 2)) {
+      try {
+        const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.BotAdd, limit: 3 });
+        const entry = logs.entries.first();
+        if (entry) await handleNukeAction(member.guild, entry.executor, `${count} bots added`);
+      } catch {}
+    }
+  }
+
   if (!data.antiRaid?.enabled) return;
   const gid = member.guild.id;
   const now = Date.now();
@@ -522,34 +649,17 @@ client.on('guildMemberAdd', async (member) => {
 
   if (arr.length >= (data.antiRaid.joins || 8)) {
     data.raidMode = true; saveData();
-    await modLog(member.guild, new EmbedBuilder().setColor(0xed4245).setTitle('ANTI-RAID TRIGGERED')
-      .setDescription(`**${arr.length}** joins in ${data.antiRaid.seconds}s.\nRaid mode **ON**. Action: ${data.antiRaid.action}\n\`*raidmode off\` when safe.`).setTimestamp());
+    await modLog(member.guild, new EmbedBuilder().setColor(0xed4245).setTitle('ANTI-RAID').setDescription(`**${arr.length}** joins in ${data.antiRaid.seconds}s. Raid mode ON.`));
     if (data.antiRaid.action === 'lockdown') {
       for (const [, ch] of member.guild.channels.cache.filter((c) => c.isTextBased())) {
         try { await ch.permissionOverwrites.edit(member.guild.id, { SendMessages: false }); } catch {}
       }
     }
   }
-
-  if (data.raidMode && (data.antiRaid.action === 'kick' || data.antiRaid.action === 'lockdown')) {
-    try {
-      await member.kick('Raid mode active');
-      await modLog(member.guild, new EmbedBuilder().setColor(0xed4245).setDescription(`Kicked ${member.user.tag} (raid mode)`));
-    } catch {}
+  if (data.raidMode && data.antiRaid.action === 'kick') {
+    try { await member.kick('Raid mode'); await modLog(member.guild, new EmbedBuilder().setColor(0xed4245).setDescription(`Kicked ${member.user.tag} (raid)`)); } catch {}
   }
 });
-
-// ─── ANTI-NUKE ─────────────────────────────────────────────
-function trackNuke(guild, type) {
-  const gid = guild.id;
-  const now = Date.now();
-  if (!recentDeletes.has(gid)) recentDeletes.set(gid, { channels: [], roles: [], bans: [], kicks: [] });
-  const rec = recentDeletes.get(gid);
-  const window = (data.antiNuke.seconds || 15) * 1000;
-  rec[type] = (rec[type] || []).filter((t) => now - t < window);
-  rec[type].push(now);
-  return rec[type].length;
-}
 
 client.on('channelDelete', async (channel) => {
   if (!data.antiNuke?.enabled || !channel.guild) return;
@@ -558,7 +668,7 @@ client.on('channelDelete', async (channel) => {
     try {
       const logs = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.ChannelDelete, limit: 3 });
       const entry = logs.entries.first();
-      if (entry) await handleNukeAction(channel.guild, entry.executor, `${count} channel deletes`);
+      if (entry) await handleNukeAction(channel.guild, entry.executor, `${count} channels deleted (last: #${channel.name})`);
     } catch {}
   }
 });
@@ -570,7 +680,7 @@ client.on('roleDelete', async (role) => {
     try {
       const logs = await role.guild.fetchAuditLogs({ type: AuditLogEvent.RoleDelete, limit: 3 });
       const entry = logs.entries.first();
-      if (entry) await handleNukeAction(role.guild, entry.executor, `${count} role deletes`);
+      if (entry) await handleNukeAction(role.guild, entry.executor, `${count} roles deleted`);
     } catch {}
   }
 });
@@ -587,11 +697,152 @@ client.on('guildBanAdd', async (ban) => {
   }
 });
 
-// ─── AUTOMOD ───────────────────────────────────────────────
+client.on('webhooksUpdate', async (channel) => {
+  if (!data.antiNuke?.enabled || !channel.guild) return;
+  const count = trackNuke(channel.guild, 'webhooks');
+  if (count >= (data.antiNuke.webhooks || 3)) {
+    try {
+      const logs = await channel.guild.fetchAuditLogs({ type: AuditLogEvent.WebhookCreate, limit: 5 });
+      const entry = logs.entries.first();
+      if (entry && Date.now() - entry.createdTimestamp < 20000)
+        await handleNukeAction(channel.guild, entry.executor, `${count} webhook changes`);
+    } catch {}
+  }
+});
+
+// ─── INTERACTIONS ─────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  try {
+    // Help menu
+    if (interaction.isStringSelectMenu() && interaction.customId === 'help_menu') {
+      const sec = HELP_SECTIONS[interaction.values[0]];
+      if (!sec) return interaction.reply({ content: 'Unknown.', ephemeral: true });
+      if (sec.admin && !isAdmin(interaction.member)) return interaction.reply({ content: 'Admin only.', ephemeral: true });
+      if (sec.staff && !isStaff(interaction.member) && !isMod(interaction.member)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`${sec.emoji} ${sec.label}`).setDescription(sec.text)], ephemeral: true });
+    }
+
+    // Ticket category → maybe form
+    if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category') {
+      const categoryId = interaction.values[0];
+      const category = data.categories.find((c) => c.id === categoryId);
+      const needForm = data.requireForm && (category?.form !== false);
+
+      if (needForm) {
+        pendingForms.set(interaction.user.id, categoryId);
+        const modal = new ModalBuilder().setCustomId(`ticket_form_${categoryId}`).setTitle(`${category?.label || 'Ticket'} — Details`);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('subject').setLabel('Subject').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100).setPlaceholder('Short summary')
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('description').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000).setPlaceholder('Explain your issue in detail')
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('priority').setLabel('Priority (low/medium/high/urgent)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(10).setPlaceholder('medium')
+          )
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+      await createTicket(interaction.guild, interaction.user, categoryId, interaction);
+      return;
+    }
+
+    // Ticket form submit
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_form_')) {
+      await interaction.deferReply({ ephemeral: true });
+      const categoryId = interaction.customId.replace('ticket_form_', '');
+      const subject = interaction.fields.getTextInputValue('subject');
+      const description = interaction.fields.getTextInputValue('description');
+      let priority = (interaction.fields.getTextInputValue('priority') || 'medium').toLowerCase().trim();
+      if (!PRIORITY[priority]) priority = 'medium';
+      pendingForms.delete(interaction.user.id);
+      await createTicket(interaction.guild, interaction.user, categoryId, interaction, { subject, description, priority });
+      return;
+    }
+
+    // Close modal
+    if (interaction.isModalSubmit() && interaction.customId === 'close_modal') {
+      await interaction.deferUpdate();
+      await closeTicket(interaction.channel, interaction.user, interaction.fields.getTextInputValue('close_reason') || 'No reason');
+      return;
+    }
+
+    // Priority select
+    if (interaction.isStringSelectMenu() && interaction.customId === 'priority_select') {
+      const priority = interaction.values[0];
+      await interaction.deferUpdate();
+      await updateTicketPriority(interaction.channel, priority, interaction.user);
+      return;
+    }
+
+    if (interaction.isButton()) {
+      if (interaction.customId === 'close_ticket') {
+        const modal = new ModalBuilder().setCustomId('close_modal').setTitle('Close Ticket');
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('close_reason').setLabel('Reason').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)
+        ));
+        await interaction.showModal(modal);
+        return;
+      }
+      if (interaction.customId === 'escalate_ticket') {
+        await interaction.deferReply({ ephemeral: true });
+        const ok = await escalateToStaff(interaction.guild, interaction.channel, interaction.user, 'User requested staff');
+        await interaction.editReply({ content: ok ? 'Staff notified.' : 'Staff channel not set.' });
+        if (ok) await interaction.channel.send('Staff has been requested.');
+        return;
+      }
+      if (interaction.customId === 'transcript_ticket') {
+        await interaction.deferReply({ ephemeral: true });
+        const t = await generateTranscript(interaction.channel);
+        await interaction.editReply({ content: 'Transcript:', files: [new AttachmentBuilder(Buffer.from(t, 'utf-8'), { name: 'transcript.txt' })] });
+        return;
+      }
+      if (interaction.customId === 'priority_ticket') {
+        const select = new StringSelectMenuBuilder().setCustomId('priority_select').setPlaceholder('Set priority...')
+          .addOptions(Object.entries(PRIORITY).map(([id, p]) => ({ label: p.label, value: id, emoji: p.emoji })));
+        await interaction.reply({ content: 'Select priority:', components: [new ActionRowBuilder().addComponents(select)], ephemeral: true });
+        return;
+      }
+      if (interaction.customId.startsWith('rate_')) {
+        const parts = interaction.customId.split('_');
+        const rating = parts[2];
+        await interaction.reply({ content: `Thanks for rating **${rating}/5**.`, ephemeral: true });
+        if (data.logChannelId) {
+          const g = interaction.client.guilds.cache.first();
+          if (g) await sendLog(g, new EmbedBuilder().setColor(0x57f287).setTitle('Ticket Rating').setDescription(`Ticket #${parts[1]} rated **${rating}/5** by ${interaction.user.tag}`));
+        }
+        return;
+      }
+      if (interaction.customId.startsWith('gw_enter_')) {
+        const gwId = interaction.customId.replace('gw_enter_', '');
+        const gw = data.giveaways[gwId];
+        if (!gw || gw.ended) return interaction.reply({ content: 'Ended.', ephemeral: true });
+        const member = interaction.member;
+        if (gw.requiredRoles?.length && !gw.requiredRoles.some((rid) => member.roles.cache.has(rid)))
+          return interaction.reply({ content: 'Missing required role.', ephemeral: true });
+        if (gw.blacklistRoles?.length && gw.blacklistRoles.some((rid) => member.roles.cache.has(rid)))
+          return interaction.reply({ content: 'Blacklisted role.', ephemeral: true });
+        if (!gw.entrants) gw.entrants = [];
+        if (gw.entrants.includes(member.id)) {
+          gw.entrants = gw.entrants.filter((id) => id !== member.id); saveData();
+          return interaction.reply({ content: 'Left giveaway.', ephemeral: true });
+        }
+        gw.entrants.push(member.id); saveData();
+        return interaction.reply({ content: `Entered! (${gw.entrants.length})`, ephemeral: true });
+      }
+    }
+  } catch (e) { console.error(e); }
+});
+
+// ─── COMMANDS ──────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
 
-  // Automod (skip staff)
+  // Automod
   if (!isStaff(message.member) && data.automod) {
     const am = data.automod;
     let hit = null;
@@ -607,14 +858,13 @@ client.on('messageCreate', async (message) => {
       const now = Date.now();
       if (!spamMap.has(key)) spamMap.set(key, []);
       const arr = spamMap.get(key).filter((t) => now - t < (am.spamSeconds || 5) * 1000);
-      arr.push(now);
-      spamMap.set(key, arr);
+      arr.push(now); spamMap.set(key, arr);
       if (arr.length >= (am.spamMessages || 5)) hit = 'spam';
     }
     if (hit) {
       await message.delete().catch(() => {});
-      const warn = await message.channel.send(`${message.author} Message removed (${hit}).`).catch(() => null);
-      if (warn) setTimeout(() => warn.delete().catch(() => {}), 4000);
+      const w = await message.channel.send(`${message.author} Removed (${hit}).`).catch(() => null);
+      if (w) setTimeout(() => w.delete().catch(() => {}), 4000);
       return;
     }
   }
@@ -641,166 +891,217 @@ client.on('messageCreate', async (message) => {
   const command = args.shift()?.toLowerCase();
   const rest = content.slice(PREFIX.length + (command?.length || 0)).trim();
 
-  // ═══════ HELP DROPDOWN ═══════
+  // HELP
   if (command === 'help') {
     const options = helpOptionsFor(message.member);
-    if (!options.length) return message.reply('No commands available.');
-    const embed = new EmbedBuilder()
-      .setColor(0x5865f2)
-      .setTitle('Help')
-      .setDescription('Select a category below. Only sections you can use are shown.')
-      .setFooter({ text: `Prefix: * · ${isAdmin(message.member) ? 'Admin' : isStaff(message.member) || isMod(message.member) ? 'Staff' : 'User'}` });
-    const select = new StringSelectMenuBuilder()
-      .setCustomId('help_menu')
-      .setPlaceholder('Choose a help section...')
-      .addOptions(options);
+    const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('Help')
+      .setDescription('Select a section. Only commands you can use are listed.')
+      .setFooter({ text: `* · ${isAdmin(message.member) ? 'Admin' : isStaff(message.member) || isMod(message.member) ? 'Staff' : 'User'}` });
+    const select = new StringSelectMenuBuilder().setCustomId('help_menu').setPlaceholder('Choose...').addOptions(options);
     return message.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] });
   }
 
-  // ═══════ ANTI-RAID CONFIG ═══════
+  // ── TICKET EXTRAS ──
+  if (command === 'priority' && message.channel.name?.startsWith('ticket-')) {
+    const p = args[0]?.toLowerCase();
+    if (!p || !PRIORITY[p]) {
+      return message.reply('Usage: `*priority low|medium|high|urgent`');
+    }
+    if (!isStaff(message.member) && !isMod(message.member)) {
+      // users can only set on their own ticket, max high
+      const info = getTicketInfo(message.channel.id);
+      if (info?.userId !== message.author.id) return message.reply('Staff only for others\' tickets.');
+      if (p === 'urgent') return message.reply('Only staff can set urgent.');
+    }
+    await updateTicketPriority(message.channel, p, message.author);
+    return;
+  }
+
+  if (command === 'claim' && message.channel.name?.startsWith('ticket-')) {
+    if (!isStaff(message.member)) return message.reply('Staff only.');
+    const info = getTicketInfo(message.channel.id);
+    if (!info) return message.reply('Not a tracked ticket.');
+    if (info.claimedBy) return message.reply(`Already claimed by <@${info.claimedBy}>. Use \`*unclaim\` first.`);
+    info.claimedBy = message.author.id; saveData();
+    return message.channel.send({ embeds: [new EmbedBuilder().setColor(0xfee75c).setDescription(`📌 Claimed by ${message.author}`)] });
+  }
+
+  if (command === 'unclaim' && message.channel.name?.startsWith('ticket-')) {
+    if (!isStaff(message.member)) return message.reply('Staff only.');
+    const info = getTicketInfo(message.channel.id);
+    if (!info) return message.reply('Not a tracked ticket.');
+    info.claimedBy = null; saveData();
+    return message.channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription('Claim removed.')] });
+  }
+
+  if (command === 'tag' && message.channel.name?.startsWith('ticket-')) {
+    if (!isStaff(message.member)) return message.reply('Staff only.');
+    const info = getTicketInfo(message.channel.id);
+    if (!info) return message.reply('Not a tracked ticket.');
+    const tag = args[0]?.toLowerCase();
+    if (!tag) return message.reply('Usage: `*tag <name>` or `*tag remove <name>`');
+    if (tag === 'remove' || tag === 'rm') {
+      const t = args[1]?.toLowerCase();
+      info.tags = (info.tags || []).filter((x) => x !== t);
+      saveData();
+      return message.reply(`Tag removed: \`${t}\``);
+    }
+    if (!info.tags) info.tags = [];
+    if (!info.tags.includes(tag)) info.tags.push(tag);
+    saveData();
+    // Global tag response
+    if (data.tags?.[tag]) {
+      await message.channel.send(data.tags[tag]);
+    }
+    return message.reply(`Tag added: \`${tag}\` · Tags: ${(info.tags || []).join(', ') || 'none'}`);
+  }
+
+  if (command === 'tags') {
+    if (!isAdmin(message.member) && !isStaff(message.member)) return message.reply('Staff only.');
+    const sub = args[0]?.toLowerCase();
+    if (sub === 'set') {
+      if (!isAdmin(message.member)) return message.reply('Admin only.');
+      const name = args[1]?.toLowerCase();
+      const text = args.slice(2).join(' ');
+      if (!name || !text) return message.reply('`*tags set <name> <response text>`');
+      if (!data.tags) data.tags = {};
+      data.tags[name] = text; saveData();
+      return message.reply(`Tag \`${name}\` saved. Use \`*tag ${name}\` in a ticket.`);
+    }
+    if (sub === 'delete' || sub === 'rm') {
+      if (!isAdmin(message.member)) return message.reply('Admin only.');
+      const name = args[1]?.toLowerCase();
+      delete data.tags[name]; saveData();
+      return message.reply(`Deleted tag \`${name}\``);
+    }
+    const list = Object.keys(data.tags || {});
+    return message.reply(list.length ? `Saved tags: ${list.map((t) => `\`${t}\``).join(', ')}` : 'No saved tags. `*tags set <name> <text>`');
+  }
+
+  if (command === 'move' && message.channel.name?.startsWith('ticket-')) {
+    if (!isStaff(message.member)) return message.reply('Staff only.');
+    const catId = args[0]?.toLowerCase();
+    const cat = data.categories.find((c) => c.id === catId);
+    if (!cat) return message.reply(`Usage: \`*move <categoryId>\`\nCategories: ${data.categories.map((c) => c.id).join(', ')}`);
+    const info = getTicketInfo(message.channel.id);
+    if (info) { info.category = cat.id; info.categoryLabel = cat.label; saveData(); }
+    await message.channel.send(`Category moved to **${cat.emoji} ${cat.label}**.`);
+    return;
+  }
+
+  if (command === 'reopen') {
+    if (!data.allowReopen) return message.reply('Reopen is disabled.');
+    // Find last closed ticket for user
+    const hist = (data.closedHistory || []).find((h) => h.userId === message.author.id);
+    if (!hist) return message.reply('No recently closed ticket found.');
+    if (Date.now() - hist.closedAt > (data.reopenHours || 24) * 3600000)
+      return message.reply(`Reopen window expired (${data.reopenHours || 24}h). Open a new ticket.`);
+    // Create new ticket in same category
+    const fakeInteraction = {
+      deferred: false, replied: false,
+      reply: async (o) => message.reply(typeof o === 'string' ? o : o.content || 'Done'),
+      editReply: async (o) => message.reply(typeof o === 'string' ? o : o.content || 'Done'),
+    };
+    await createTicket(message.guild, message.author, hist.category?.toLowerCase?.() || 'general', fakeInteraction, {
+      subject: `Reopened #${hist.number}`,
+      description: `Reopening previous ticket. Previous close reason: ${hist.reason}`,
+      priority: hist.priority || 'medium',
+    });
+    return;
+  }
+
+  if (command === 'closeticket' && message.channel.name?.startsWith('ticket-')) {
+    if (!isStaff(message.member)) return message.reply('Staff only.');
+    await closeTicket(message.channel, message.author, args.join(' ') || 'Closed by staff');
+    return;
+  }
+
+  // ANTI-RAID / NUKE CONFIG (same as before, expanded)
   if (command === 'antiraid') {
     if (!isAdmin(message.member)) return message.reply('Administrator only.');
     const sub = args[0]?.toLowerCase();
     if (!sub || sub === 'show') {
       const ar = data.antiRaid;
-      return message.reply({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Anti-Raid Config').addFields(
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Anti-Raid').addFields(
         { name: 'Enabled', value: ar.enabled ? 'Yes' : 'No', inline: true },
-        { name: 'Joins threshold', value: `${ar.joins}`, inline: true },
-        { name: 'Time window', value: `${ar.seconds}s`, inline: true },
-        { name: 'Action', value: ar.action || 'kick', inline: true },
-        { name: 'Raid mode now', value: data.raidMode ? 'ON' : 'OFF', inline: true }
-      ).setFooter({ text: '*antiraid on|off|joins <n>|seconds <n>|action kick|alert|lockdown' })] });
+        { name: 'Joins', value: `${ar.joins}`, inline: true },
+        { name: 'Seconds', value: `${ar.seconds}`, inline: true },
+        { name: 'Action', value: ar.action, inline: true },
+        { name: 'Raid mode', value: data.raidMode ? 'ON' : 'OFF', inline: true }
+      )] });
     }
-    if (sub === 'on') { data.antiRaid.enabled = true; saveData(); return message.reply('Anti-raid **ON**'); }
-    if (sub === 'off') { data.antiRaid.enabled = false; saveData(); return message.reply('Anti-raid **OFF**'); }
-    if (sub === 'joins') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 2 || n > 50) return message.reply('Usage: `*antiraid joins <2-50>`');
-      data.antiRaid.joins = n; saveData(); return message.reply(`Joins threshold → **${n}**`);
-    }
-    if (sub === 'seconds') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 3 || n > 120) return message.reply('Usage: `*antiraid seconds <3-120>`');
-      data.antiRaid.seconds = n; saveData(); return message.reply(`Window → **${n}s**`);
-    }
+    if (sub === 'on') { data.antiRaid.enabled = true; saveData(); return message.reply('Anti-raid ON'); }
+    if (sub === 'off') { data.antiRaid.enabled = false; saveData(); return message.reply('Anti-raid OFF'); }
+    if (sub === 'joins') { data.antiRaid.joins = parseInt(args[1], 10) || 8; saveData(); return message.reply(`Joins → ${data.antiRaid.joins}`); }
+    if (sub === 'seconds') { data.antiRaid.seconds = parseInt(args[1], 10) || 10; saveData(); return message.reply(`Seconds → ${data.antiRaid.seconds}`); }
     if (sub === 'action') {
       const a = args[1]?.toLowerCase();
-      if (!['kick', 'alert', 'lockdown'].includes(a)) return message.reply('Usage: `*antiraid action kick|alert|lockdown`');
-      data.antiRaid.action = a; saveData(); return message.reply(`Action → **${a}**`);
+      if (!['kick', 'alert', 'lockdown'].includes(a)) return message.reply('kick|alert|lockdown');
+      data.antiRaid.action = a; saveData(); return message.reply(`Action → ${a}`);
     }
-    return message.reply('`*antiraid show|on|off|joins <n>|seconds <n>|action kick|alert|lockdown`');
+    return message.reply('`*antiraid show|on|off|joins|seconds|action`');
   }
 
-  // ═══════ ANTI-NUKE CONFIG ═══════
   if (command === 'antinuke') {
     if (!isAdmin(message.member)) return message.reply('Administrator only.');
     const sub = args[0]?.toLowerCase();
     if (!sub || sub === 'show') {
       const an = data.antiNuke;
-      return message.reply({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Anti-Nuke Config').addFields(
+      return message.reply({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Anti-Nuke').addFields(
         { name: 'Enabled', value: an.enabled ? 'Yes' : 'No', inline: true },
-        { name: 'Channel deletes', value: `${an.channelDeletes}`, inline: true },
-        { name: 'Role deletes', value: `${an.roleDeletes}`, inline: true },
+        { name: 'Channels', value: `${an.channelDeletes}`, inline: true },
+        { name: 'Roles', value: `${an.roleDeletes}`, inline: true },
         { name: 'Bans', value: `${an.bans}`, inline: true },
-        { name: 'Time window', value: `${an.seconds}s`, inline: true },
-        { name: 'Action', value: an.action || 'strip', inline: true },
+        { name: 'Webhooks', value: `${an.webhooks}`, inline: true },
+        { name: 'Bot adds', value: `${an.botAdds}`, inline: true },
+        { name: 'Window', value: `${an.seconds}s`, inline: true },
+        { name: 'Action', value: an.action, inline: true },
+        { name: 'Quarantine role', value: data.quarantineRoleId ? `<@&${data.quarantineRoleId}>` : 'Not set', inline: true },
         { name: 'Exempt users', value: (an.exemptUserIds || []).map((id) => `<@${id}>`).join(' ') || 'None' },
         { name: 'Exempt roles', value: (an.exemptRoleIds || []).map((id) => `<@&${id}>`).join(' ') || 'None' }
-      ).setFooter({ text: '*antinuke channels|roles|bans|seconds|action|exempt add/remove' })] });
+      ).setFooter({ text: '*antinuke channels|roles|bans|webhooks|bots|seconds|action|exempt|log|quarantine' })] });
     }
-    if (sub === 'on') { data.antiNuke.enabled = true; saveData(); return message.reply('Anti-nuke **ON**'); }
-    if (sub === 'off') { data.antiNuke.enabled = false; saveData(); return message.reply('Anti-nuke **OFF**'); }
-    if (sub === 'channels') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 1 || n > 20) return message.reply('`*antinuke channels <1-20>`');
-      data.antiNuke.channelDeletes = n; saveData(); return message.reply(`Channel delete limit → **${n}**`);
-    }
-    if (sub === 'roles') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 1 || n > 20) return message.reply('`*antinuke roles <1-20>`');
-      data.antiNuke.roleDeletes = n; saveData(); return message.reply(`Role delete limit → **${n}**`);
-    }
-    if (sub === 'bans') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 1 || n > 30) return message.reply('`*antinuke bans <1-30>`');
-      data.antiNuke.bans = n; saveData(); return message.reply(`Ban limit → **${n}**`);
-    }
-    if (sub === 'seconds') {
-      const n = parseInt(args[1], 10);
-      if (!n || n < 5 || n > 120) return message.reply('`*antinuke seconds <5-120>`');
-      data.antiNuke.seconds = n; saveData(); return message.reply(`Window → **${n}s**`);
-    }
+    if (sub === 'on') { data.antiNuke.enabled = true; saveData(); return message.reply('Anti-nuke ON'); }
+    if (sub === 'off') { data.antiNuke.enabled = false; saveData(); return message.reply('Anti-nuke OFF'); }
+    if (sub === 'channels') { data.antiNuke.channelDeletes = parseInt(args[1], 10) || 3; saveData(); return message.reply(`Channels → ${data.antiNuke.channelDeletes}`); }
+    if (sub === 'roles') { data.antiNuke.roleDeletes = parseInt(args[1], 10) || 3; saveData(); return message.reply(`Roles → ${data.antiNuke.roleDeletes}`); }
+    if (sub === 'bans') { data.antiNuke.bans = parseInt(args[1], 10) || 5; saveData(); return message.reply(`Bans → ${data.antiNuke.bans}`); }
+    if (sub === 'webhooks') { data.antiNuke.webhooks = parseInt(args[1], 10) || 3; saveData(); return message.reply(`Webhooks → ${data.antiNuke.webhooks}`); }
+    if (sub === 'bots') { data.antiNuke.botAdds = parseInt(args[1], 10) || 2; saveData(); return message.reply(`Bot adds → ${data.antiNuke.botAdds}`); }
+    if (sub === 'seconds') { data.antiNuke.seconds = parseInt(args[1], 10) || 15; saveData(); return message.reply(`Window → ${data.antiNuke.seconds}s`); }
     if (sub === 'action') {
       const a = args[1]?.toLowerCase();
-      if (!['strip', 'alert', 'ban', 'kick'].includes(a)) return message.reply('`*antinuke action strip|alert|ban|kick`');
-      data.antiNuke.action = a; saveData(); return message.reply(`Action → **${a}**`);
+      if (!['quarantine', 'strip', 'ban', 'kick', 'alert'].includes(a)) return message.reply('quarantine|strip|ban|kick|alert');
+      data.antiNuke.action = a; saveData(); return message.reply(`Action → ${a}`);
+    }
+    if (sub === 'quarantine') {
+      const role = message.mentions.roles.first();
+      if (!role) return message.reply('`*antinuke quarantine @role`');
+      data.quarantineRoleId = role.id; saveData(); return message.reply(`Quarantine role → ${role}`);
+    }
+    if (sub === 'log') {
+      const ch = message.mentions.channels.first();
+      if (!ch) return message.reply('`*antinuke log #channel`');
+      data.antiNuke.logChannelId = ch.id; saveData(); return message.reply(`Nuke log → ${ch}`);
     }
     if (sub === 'exempt') {
       const act = args[1]?.toLowerCase();
       const user = message.mentions.users.first();
       const role = message.mentions.roles.first();
       if (act === 'add') {
-        if (user) { if (!data.antiNuke.exemptUserIds.includes(user.id)) data.antiNuke.exemptUserIds.push(user.id); saveData(); return message.reply(`Exempt user ${user}`); }
-        if (role) { if (!data.antiNuke.exemptRoleIds.includes(role.id)) data.antiNuke.exemptRoleIds.push(role.id); saveData(); return message.reply(`Exempt role ${role}`); }
-        return message.reply('`*antinuke exempt add @user|@role`');
+        if (user) { if (!data.antiNuke.exemptUserIds.includes(user.id)) data.antiNuke.exemptUserIds.push(user.id); saveData(); return message.reply(`Exempt ${user}`); }
+        if (role) { if (!data.antiNuke.exemptRoleIds.includes(role.id)) data.antiNuke.exemptRoleIds.push(role.id); saveData(); return message.reply(`Exempt ${role}`); }
       }
       if (act === 'remove' || act === 'rm') {
-        if (user) { data.antiNuke.exemptUserIds = data.antiNuke.exemptUserIds.filter((id) => id !== user.id); saveData(); return message.reply(`Removed exempt ${user}`); }
-        if (role) { data.antiNuke.exemptRoleIds = data.antiNuke.exemptRoleIds.filter((id) => id !== role.id); saveData(); return message.reply(`Removed exempt ${role}`); }
-        return message.reply('`*antinuke exempt remove @user|@role`');
+        if (user) { data.antiNuke.exemptUserIds = data.antiNuke.exemptUserIds.filter((id) => id !== user.id); saveData(); return message.reply(`Removed ${user}`); }
+        if (role) { data.antiNuke.exemptRoleIds = data.antiNuke.exemptRoleIds.filter((id) => id !== role.id); saveData(); return message.reply(`Removed ${role}`); }
       }
       return message.reply('`*antinuke exempt add|remove @user|@role`');
     }
-    return message.reply('`*antinuke show|on|off|channels|roles|bans|seconds|action|exempt`');
+    return message.reply('`*antinuke show|on|off|channels|roles|bans|webhooks|bots|seconds|action|quarantine|log|exempt`');
   }
 
-  // ═══════ AUTOMOD ═══════
-  if (command === 'automod') {
-    if (!isAdmin(message.member)) return message.reply('Administrator only.');
-    const sub = args[0]?.toLowerCase();
-    if (!sub || sub === 'show') {
-      const am = data.automod;
-      return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Automod').addFields(
-        { name: 'Anti-link', value: am.antiLink ? 'ON' : 'OFF', inline: true },
-        { name: 'Anti-invite', value: am.antiInvite ? 'ON' : 'OFF', inline: true },
-        { name: 'Anti-spam', value: am.antiSpam ? `ON (${am.spamMessages}/${am.spamSeconds}s)` : 'OFF', inline: true },
-        { name: 'Max mentions', value: am.maxMentions ? `${am.maxMentions}` : 'OFF', inline: true },
-        { name: 'Blocked words', value: (am.blockedWords || []).join(', ') || 'None' }
-      ).setFooter({ text: '*automod link|invite|spam|mentions|word on/off' })] });
-    }
-    if (sub === 'link') { data.automod.antiLink = args[1]?.toLowerCase() !== 'off'; saveData(); return message.reply(`Anti-link → ${data.automod.antiLink ? 'ON' : 'OFF'}`); }
-    if (sub === 'invite') { data.automod.antiInvite = args[1]?.toLowerCase() !== 'off'; saveData(); return message.reply(`Anti-invite → ${data.automod.antiInvite ? 'ON' : 'OFF'}`); }
-    if (sub === 'spam') {
-      if (args[1]?.toLowerCase() === 'off') { data.automod.antiSpam = false; saveData(); return message.reply('Anti-spam OFF'); }
-      data.automod.antiSpam = true;
-      if (args[1]) data.automod.spamMessages = parseInt(args[1], 10) || 5;
-      if (args[2]) data.automod.spamSeconds = parseInt(args[2], 10) || 5;
-      saveData(); return message.reply(`Anti-spam ON (${data.automod.spamMessages} msgs / ${data.automod.spamSeconds}s)`);
-    }
-    if (sub === 'mentions') {
-      const n = parseInt(args[1], 10);
-      if (isNaN(n) || n < 0) return message.reply('`*automod mentions <n>` (0 = off)');
-      data.automod.maxMentions = n; saveData(); return message.reply(`Max mentions → ${n || 'OFF'}`);
-    }
-    if (sub === 'word') {
-      const act = args[1]?.toLowerCase();
-      if (act === 'add') {
-        const w = args.slice(2).join(' ').trim();
-        if (!w) return message.reply('`*automod word add <word>`');
-        if (!data.automod.blockedWords.includes(w)) data.automod.blockedWords.push(w);
-        saveData(); return message.reply(`Blocked: \`${w}\``);
-      }
-      if (act === 'remove') {
-        const w = args.slice(2).join(' ').trim();
-        data.automod.blockedWords = data.automod.blockedWords.filter((x) => x !== w);
-        saveData(); return message.reply(`Unblocked: \`${w}\``);
-      }
-      return message.reply('`*automod word add|remove <word>`');
-    }
-    return message.reply('`*automod show|link|invite|spam|mentions|word`');
-  }
-
-  // ═══════ MODERATION ═══════
+  // Simplified rest of mod/config commands - keep essential ones
   if (command === 'ban') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
     const user = message.mentions.users.first() || await client.users.fetch(args[0]).catch(() => null);
@@ -808,26 +1109,25 @@ client.on('messageCreate', async (message) => {
     const reason = args.slice(1).join(' ') || 'No reason';
     try {
       await message.guild.members.ban(user.id, { reason: `${message.author.tag}: ${reason}` });
-      await modLog(message.guild, new EmbedBuilder().setColor(0xed4245).setTitle('Ban').addFields({ name: 'User', value: `${user.tag}` }, { name: 'Mod', value: message.author.tag }, { name: 'Reason', value: reason }));
+      await modLog(message.guild, new EmbedBuilder().setColor(0xed4245).setTitle('Ban').addFields({ name: 'User', value: user.tag }, { name: 'Mod', value: message.author.tag }, { name: 'Reason', value: reason }));
       return message.reply(`Banned **${user.tag}**.`);
     } catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
   if (command === 'softban') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
     const user = message.mentions.users.first();
-    if (!user) return message.reply('`*softban @user [reason]` (ban+unban to delete messages)');
-    const reason = args.slice(1).join(' ') || 'Softban';
+    if (!user) return message.reply('`*softban @user`');
     try {
-      await message.guild.members.ban(user.id, { reason, deleteMessageSeconds: 86400 });
-      await message.guild.members.unban(user.id, 'Softban unban');
+      await message.guild.members.ban(user.id, { deleteMessageSeconds: 86400, reason: 'Softban' });
+      await message.guild.members.unban(user.id);
       return message.reply(`Softbanned **${user.tag}**.`);
     } catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
   if (command === 'unban') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
-    const id = args[0]?.replace(/[<@!>]/g, '');
-    if (!id) return message.reply('`*unban <userId>`');
-    try { await message.guild.members.unban(id); return message.reply(`Unbanned \`${id}\`.`); }
+    const id = args[0]?.replace(/\D/g, '');
+    if (!id) return message.reply('`*unban <id>`');
+    try { await message.guild.members.unban(id); return message.reply('Unbanned.'); }
     catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
   if (command === 'kick') {
@@ -844,13 +1144,12 @@ client.on('messageCreate', async (message) => {
   if (command === 'timeout' || command === 'mute') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
     const member = message.mentions.members.first();
-    if (!member) return message.reply('`*timeout @user <duration> [reason]`');
+    if (!member) return message.reply('`*timeout @user 1h [reason]`');
     const dur = parseDuration(args[1]);
     if (!dur || dur > 28 * 86400000) return message.reply('Invalid duration (max 28d).');
     const reason = args.slice(2).join(' ') || 'No reason';
     try {
       await member.timeout(dur, `${message.author.tag}: ${reason}`);
-      await modLog(message.guild, new EmbedBuilder().setColor(0xfaa61a).setTitle('Timeout').addFields({ name: 'User', value: member.user.tag }, { name: 'Duration', value: formatDuration(dur) }, { name: 'Mod', value: message.author.tag }, { name: 'Reason', value: reason }));
       return message.reply(`Timed out **${member.user.tag}** for ${formatDuration(dur)}.`);
     } catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
@@ -858,21 +1157,7 @@ client.on('messageCreate', async (message) => {
     if (!isMod(message.member)) return message.reply('Missing permission.');
     const member = message.mentions.members.first();
     if (!member) return message.reply('`*untimeout @user`');
-    try { await member.timeout(null); return message.reply(`Timeout removed from **${member.user.tag}**.`); }
-    catch (e) { return message.reply(`Failed: ${e.message}`); }
-  }
-  if (command === 'vmute') {
-    if (!isMod(message.member)) return message.reply('Missing permission.');
-    const member = message.mentions.members.first();
-    if (!member) return message.reply('`*vmute @user`');
-    try { await member.voice.setMute(true); return message.reply(`Voice-muted **${member.user.tag}**.`); }
-    catch (e) { return message.reply(`Failed: ${e.message}`); }
-  }
-  if (command === 'vunmute') {
-    if (!isMod(message.member)) return message.reply('Missing permission.');
-    const member = message.mentions.members.first();
-    if (!member) return message.reply('`*vunmute @user`');
-    try { await member.voice.setMute(false); return message.reply(`Voice-unmuted **${member.user.tag}**.`); }
+    try { await member.timeout(null); return message.reply('Timeout removed.'); }
     catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
   if (command === 'warn') {
@@ -883,52 +1168,31 @@ client.on('messageCreate', async (message) => {
     if (!data.warnings[user.id]) data.warnings[user.id] = [];
     data.warnings[user.id].push({ reason, mod: message.author.id, at: Date.now() });
     saveData();
-    await modLog(message.guild, new EmbedBuilder().setColor(0xfee75c).setTitle('Warn').addFields({ name: 'User', value: user.tag }, { name: 'Mod', value: message.author.tag }, { name: 'Reason', value: reason }, { name: 'Total', value: `${data.warnings[user.id].length}` }));
     return message.reply(`Warned **${user.tag}** (#${data.warnings[user.id].length}).`);
   }
   if (command === 'warnings' || command === 'warns') {
     const user = message.mentions.users.first() || message.author;
     const list = data.warnings[user.id] || [];
-    if (!list.length) return message.reply(`${user.tag} has no warnings.`);
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle(`Warnings — ${user.tag}`).setDescription(list.slice(-15).map((w, i) => `**${i + 1}.** ${w.reason} — <@${w.mod}> — <t:${Math.floor(w.at / 1000)}:R>`).join('\n'))] });
+    if (!list.length) return message.reply(`${user.tag}: no warnings.`);
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle(`Warnings — ${user.tag}`).setDescription(list.slice(-15).map((w, i) => `**${i + 1}.** ${w.reason} — <@${w.mod}>`).join('\n'))] });
   }
   if (command === 'clearwarns') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
     const user = message.mentions.users.first();
     if (!user) return message.reply('`*clearwarns @user`');
     data.warnings[user.id] = []; saveData();
-    return message.reply(`Cleared warnings for **${user.tag}**.`);
-  }
-  if (command === 'note') {
-    if (!isMod(message.member)) return message.reply('Missing permission.');
-    const user = message.mentions.users.first();
-    if (!user) return message.reply('`*note @user <text>`');
-    const text = args.slice(1).join(' ');
-    if (!text) return message.reply('`*note @user <text>`');
-    if (!data.notes[user.id]) data.notes[user.id] = [];
-    data.notes[user.id].push({ text, mod: message.author.id, at: Date.now() });
-    saveData();
-    return message.reply(`Note added for **${user.tag}**.`);
-  }
-  if (command === 'notes') {
-    if (!isMod(message.member)) return message.reply('Missing permission.');
-    const user = message.mentions.users.first();
-    if (!user) return message.reply('`*notes @user`');
-    const list = data.notes[user.id] || [];
-    if (!list.length) return message.reply('No notes.');
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`Notes — ${user.tag}`).setDescription(list.slice(-15).map((n, i) => `**${i + 1}.** ${n.text} — <@${n.mod}>`).join('\n'))] });
+    return message.reply('Cleared.');
   }
   if (command === 'jail') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
-    if (!data.jailRoleId) return message.reply('Set jail role: `*config jail @role`');
+    if (!data.jailRoleId) return message.reply('`*config jail @role`');
     const member = message.mentions.members.first();
     if (!member) return message.reply('`*jail @user [reason]`');
     const reason = args.slice(1).join(' ') || 'No reason';
     try {
-      data.jails[member.id] = { roles: [...member.roles.cache.keys()].filter((id) => id !== message.guild.id), at: Date.now(), mod: message.author.id };
-      await member.roles.set([data.jailRoleId], `Jail: ${reason}`);
+      data.jails[member.id] = { roles: [...member.roles.cache.keys()].filter((id) => id !== message.guild.id), at: Date.now() };
+      await member.roles.set([data.jailRoleId], reason);
       saveData();
-      await modLog(message.guild, new EmbedBuilder().setColor(0x992d22).setTitle('Jail').addFields({ name: 'User', value: member.user.tag }, { name: 'Mod', value: message.author.tag }, { name: 'Reason', value: reason }));
       return message.reply(`Jailed **${member.user.tag}**.`);
     } catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
@@ -938,7 +1202,7 @@ client.on('messageCreate', async (message) => {
     if (!member) return message.reply('`*unjail @user`');
     const saved = data.jails[member.id];
     try {
-      if (saved?.roles?.length) await member.roles.set(saved.roles.filter((id) => message.guild.roles.cache.has(id)), 'Unjail');
+      if (saved?.roles?.length) await member.roles.set(saved.roles.filter((id) => message.guild.roles.cache.has(id)));
       else if (data.jailRoleId) await member.roles.remove(data.jailRoleId);
       delete data.jails[member.id]; saveData();
       return message.reply(`Unjailed **${member.user.tag}**.`);
@@ -950,7 +1214,7 @@ client.on('messageCreate', async (message) => {
     if (n < 1) return message.reply('`*purge <1-100>`');
     try {
       const deleted = await message.channel.bulkDelete(n + 1, true);
-      const m = await message.channel.send(`Deleted **${deleted.size - 1}** messages.`);
+      const m = await message.channel.send(`Deleted **${deleted.size - 1}**.`);
       setTimeout(() => m.delete().catch(() => {}), 3000);
     } catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
@@ -959,7 +1223,7 @@ client.on('messageCreate', async (message) => {
     const sec = parseInt(args[0], 10);
     if (isNaN(sec) || sec < 0 || sec > 21600) return message.reply('`*slowmode <0-21600>`');
     await message.channel.setRateLimitPerUser(sec);
-    return message.reply(sec ? `Slowmode: **${sec}s**` : 'Slowmode off.');
+    return message.reply(sec ? `Slowmode **${sec}s**` : 'Slowmode off.');
   }
   if (command === 'lock') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
@@ -971,93 +1235,100 @@ client.on('messageCreate', async (message) => {
     await message.channel.permissionOverwrites.edit(message.guild.id, { SendMessages: null });
     return message.reply('Unlocked.');
   }
-  if (command === 'nick' || command === 'nickname') {
+  if (command === 'nick') {
     if (!isMod(message.member)) return message.reply('Missing permission.');
     const member = message.mentions.members.first();
     if (!member) return message.reply('`*nick @user [name|reset]`');
     const nick = args.slice(1).join(' ');
-    try {
-      await member.setNickname(nick === 'reset' || !nick ? null : nick.slice(0, 32));
-      return message.reply('Nickname updated.');
-    } catch (e) { return message.reply(`Failed: ${e.message}`); }
+    try { await member.setNickname(nick === 'reset' || !nick ? null : nick.slice(0, 32)); return message.reply('Done.'); }
+    catch (e) { return message.reply(`Failed: ${e.message}`); }
+  }
+  if (command === 'note') {
+    if (!isMod(message.member)) return message.reply('Missing permission.');
+    const user = message.mentions.users.first();
+    const text = args.slice(1).join(' ');
+    if (!user || !text) return message.reply('`*note @user <text>`');
+    if (!data.notes[user.id]) data.notes[user.id] = [];
+    data.notes[user.id].push({ text, mod: message.author.id, at: Date.now() });
+    saveData(); return message.reply('Note saved.');
+  }
+  if (command === 'notes') {
+    if (!isMod(message.member)) return message.reply('Missing permission.');
+    const user = message.mentions.users.first();
+    if (!user) return message.reply('`*notes @user`');
+    const list = data.notes[user.id] || [];
+    if (!list.length) return message.reply('No notes.');
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`Notes — ${user.tag}`).setDescription(list.slice(-15).map((n, i) => `**${i + 1}.** ${n.text}`).join('\n'))] });
+  }
+  if (command === 'vmute') {
+    if (!isMod(message.member)) return message.reply('Missing permission.');
+    const member = message.mentions.members.first();
+    if (!member) return message.reply('`*vmute @user`');
+    try { await member.voice.setMute(true); return message.reply('Voice muted.'); } catch (e) { return message.reply(`Failed: ${e.message}`); }
+  }
+  if (command === 'vunmute') {
+    if (!isMod(message.member)) return message.reply('Missing permission.');
+    const member = message.mentions.members.first();
+    if (!member) return message.reply('`*vunmute @user`');
+    try { await member.voice.setMute(false); return message.reply('Voice unmuted.'); } catch (e) { return message.reply(`Failed: ${e.message}`); }
   }
   if (command === 'raidmode') {
     if (!isStaff(message.member)) return message.reply('Staff only.');
     const sub = args[0]?.toLowerCase();
-    if (sub === 'on') { data.raidMode = true; saveData(); return message.reply('**Raid mode ON**');
-    }
+    if (sub === 'on') { data.raidMode = true; saveData(); return message.reply('Raid mode ON'); }
     if (sub === 'off') { data.raidMode = false; saveData(); return message.reply('Raid mode OFF'); }
     return message.reply(`Raid mode: **${data.raidMode ? 'ON' : 'OFF'}**`);
   }
   if (command === 'lockdown') {
     if (!isAdmin(message.member)) return message.reply('Administrator only.');
-    const sub = args[0]?.toLowerCase();
+    const off = args[0]?.toLowerCase() === 'off';
     let n = 0;
     for (const [, ch] of message.guild.channels.cache.filter((c) => c.isTextBased() && c.viewable)) {
       try {
-        if (sub === 'off' || sub === 'unlock') await ch.permissionOverwrites.edit(message.guild.id, { SendMessages: null });
-        else await ch.permissionOverwrites.edit(message.guild.id, { SendMessages: false });
+        await ch.permissionOverwrites.edit(message.guild.id, { SendMessages: off ? null : false });
         n++;
       } catch {}
     }
-    return message.reply(sub === 'off' || sub === 'unlock' ? `Unlocked ~${n} channels.` : `Locked ~${n} channels.`);
+    return message.reply(off ? `Unlocked ~${n}` : `Locked ~${n}`);
   }
 
-  // ═══════ GIVEAWAY ═══════
+  // GIVEAWAY
   if (command === 'giveaway' || command === 'gw') {
     const sub = args.shift()?.toLowerCase();
     if (sub === 'create' || sub === 'start') {
       if (!isStaff(message.member)) return message.reply('Staff only.');
-      const raw = rest.replace(/^(create|start)\s*/i, '').trim();
-      const parsed = parseGiveawayArgs(raw);
-      if (!parsed) {
-        return message.reply(
-          '**Usage:** `*giveaway create duration | winners | prize | @reqRole | bl:@role`\n' +
-          'Example: `*giveaway create 24h | 1 | Nitro | @Member | bl:@Muted`'
-        );
-      }
+      const parsed = parseGiveawayArgs(rest.replace(/^(create|start)\s*/i, '').trim());
+      if (!parsed) return message.reply('`*giveaway create 24h | 1 | Prize | @req | bl:@role`');
       const gwId = Date.now().toString(36);
       const endsAt = Date.now() + parsed.duration;
       const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('GIVEAWAY').setDescription(
         `**Prize:** ${parsed.prize}\n**Winners:** ${parsed.winners}\n**Ends:** <t:${Math.floor(endsAt / 1000)}:R>\n` +
         (parsed.requiredRoles.length ? `**Required:** ${parsed.requiredRoles.map((id) => `<@&${id}>`).join(' ')}\n` : '') +
         (parsed.blacklistRoles.length ? `**Blacklist:** ${parsed.blacklistRoles.map((id) => `<@&${id}>`).join(' ')}\n` : '') +
-        `\nClick **Enter** to participate!`
-      ).setFooter({ text: `Host: ${message.author.tag} · ID: ${gwId}` }).setTimestamp(endsAt);
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`gw_enter_${gwId}`).setLabel('Enter').setStyle(ButtonStyle.Success).setEmoji('🎉')
-      );
+        `\nClick **Enter**!`
+      ).setFooter({ text: `ID: ${gwId}` }).setTimestamp(endsAt);
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`gw_enter_${gwId}`).setLabel('Enter').setStyle(ButtonStyle.Success).setEmoji('🎉'));
       const msg = await message.channel.send({ embeds: [embed], components: [row] });
-      data.giveaways[gwId] = {
-        guildId: message.guild.id, channelId: message.channel.id, messageId: msg.id,
-        prize: parsed.prize, winners: parsed.winners, endsAt, hostId: message.author.id,
-        requiredRoles: parsed.requiredRoles, blacklistRoles: parsed.blacklistRoles, entrants: [], ended: false,
-      };
+      data.giveaways[gwId] = { guildId: message.guild.id, channelId: message.channel.id, messageId: msg.id, prize: parsed.prize, winners: parsed.winners, endsAt, requiredRoles: parsed.requiredRoles, blacklistRoles: parsed.blacklistRoles, entrants: [], ended: false };
       saveData();
       setTimeout(() => endGiveaway(message.guild, gwId), parsed.duration);
-      return message.reply(`Giveaway started → ${msg.url}`);
+      return message.reply(`Started → ${msg.url}`);
     }
-    if (sub === 'end') {
-      if (!isStaff(message.member)) return message.reply('Staff only.');
-      const id = args[0]; if (!id || !data.giveaways[id]) return message.reply('`*giveaway end <id>`');
-      await endGiveaway(message.guild, id); return message.reply('Ended.');
-    }
+    if (sub === 'end') { if (!isStaff(message.member)) return message.reply('Staff only.'); await endGiveaway(message.guild, args[0]); return message.reply('Ended.'); }
     if (sub === 'reroll') {
       if (!isStaff(message.member)) return message.reply('Staff only.');
       const gw = data.giveaways[args[0]];
-      if (!gw?.entrants?.length) return message.reply('No entrants / invalid id.');
-      const winner = gw.entrants[Math.floor(Math.random() * gw.entrants.length)];
-      return message.channel.send(`Reroll for **${gw.prize}**: <@${winner}>`);
+      if (!gw?.entrants?.length) return message.reply('No entrants.');
+      return message.channel.send(`Reroll **${gw.prize}**: <@${gw.entrants[Math.floor(Math.random() * gw.entrants.length)]}>`);
     }
     if (sub === 'list') {
       const active = Object.entries(data.giveaways || {}).filter(([, g]) => !g.ended && g.guildId === message.guild.id);
-      if (!active.length) return message.reply('No active giveaways.');
-      return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Active Giveaways').setDescription(active.map(([id, g]) => `**${g.prize}** — <t:${Math.floor(g.endsAt / 1000)}:R> — \`${id}\` — ${(g.entrants || []).length} entries`).join('\n'))] });
+      if (!active.length) return message.reply('None.');
+      return message.reply(active.map(([id, g]) => `**${g.prize}** — <t:${Math.floor(g.endsAt / 1000)}:R> — \`${id}\``).join('\n'));
     }
-    return message.reply('`*giveaway create|end|reroll|list`');
   }
 
-  // ═══════ STAFF / CONFIG / TICKETS ═══════
+  // STAFF / CONFIG
   if (command === 'staff') {
     if (!isAdmin(message.member)) return message.reply('Administrator only.');
     const sub = args.shift()?.toLowerCase();
@@ -1070,18 +1341,16 @@ client.on('messageCreate', async (message) => {
     if (sub === 'add') {
       const user = message.mentions.users.first();
       const role = message.mentions.roles.first();
-      if (user) { if (!data.staffUserIds.includes(user.id)) data.staffUserIds.push(user.id); saveData(); return message.reply(`Staff user ${user}`); }
-      if (role) { if (!data.staffRoleIds.includes(role.id)) data.staffRoleIds.push(role.id); saveData(); return message.reply(`Staff role ${role}`); }
-      return message.reply('`*staff add @user` or `@role`');
+      if (user) { if (!data.staffUserIds.includes(user.id)) data.staffUserIds.push(user.id); saveData(); return message.reply(`Added ${user}`); }
+      if (role) { if (!data.staffRoleIds.includes(role.id)) data.staffRoleIds.push(role.id); saveData(); return message.reply(`Added ${role}`); }
+      return message.reply('`*staff add @user|@role`');
     }
     if (sub === 'remove' || sub === 'rm') {
       const user = message.mentions.users.first();
       const role = message.mentions.roles.first();
       if (user) { data.staffUserIds = data.staffUserIds.filter((id) => id !== user.id); saveData(); return message.reply(`Removed ${user}`); }
       if (role) { data.staffRoleIds = data.staffRoleIds.filter((id) => id !== role.id); saveData(); return message.reply(`Removed ${role}`); }
-      return message.reply('`*staff remove @user` or `@role`');
     }
-    return message.reply('`*staff list|add|remove`');
   }
 
   if (command === 'blacklist' || command === 'bl') {
@@ -1094,7 +1363,7 @@ client.on('messageCreate', async (message) => {
       if (!data.blacklist.includes(user.id)) data.blacklist.push(user.id);
       saveData(); return message.reply(`Blacklisted ${user}`);
     }
-    if (sub === 'remove' || sub === 'rm') {
+    if (sub === 'remove') {
       const user = message.mentions.users.first();
       if (!user) return message.reply('`*blacklist remove @user`');
       data.blacklist = data.blacklist.filter((id) => id !== user.id);
@@ -1109,19 +1378,29 @@ client.on('messageCreate', async (message) => {
       return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Config').addFields(
         { name: 'Log', value: data.logChannelId ? `<#${data.logChannelId}>` : '—', inline: true },
         { name: 'Mod log', value: data.modLogChannelId ? `<#${data.modLogChannelId}>` : '—', inline: true },
-        { name: 'Staff ch', value: data.staffChannelId ? `<#${data.staffChannelId}>` : '—', inline: true },
+        { name: 'Staff', value: data.staffChannelId ? `<#${data.staffChannelId}>` : '—', inline: true },
         { name: 'Jail', value: data.jailRoleId ? `<@&${data.jailRoleId}>` : '—', inline: true },
-        { name: 'Ticket limit', value: `${data.maxTicketsPerUser}`, inline: true },
-        { name: 'Auto-close', value: data.autoCloseHours ? `${data.autoCloseHours}h` : 'Off', inline: true }
+        { name: 'Quarantine', value: data.quarantineRoleId ? `<@&${data.quarantineRoleId}>` : '—', inline: true },
+        { name: 'Form', value: data.requireForm ? 'ON' : 'OFF', inline: true },
+        { name: 'Reopen', value: data.allowReopen ? `${data.reopenHours}h` : 'OFF', inline: true },
+        { name: 'Rating', value: data.ratingEnabled ? 'ON' : 'OFF', inline: true }
       )] });
     }
     if (sub === 'log') { const ch = message.mentions.channels.first(); if (!ch) return message.reply('`*config log #ch`'); data.logChannelId = ch.id; saveData(); return message.reply(`Log → ${ch}`); }
     if (sub === 'modlog') { const ch = message.mentions.channels.first(); if (!ch) return message.reply('`*config modlog #ch`'); data.modLogChannelId = ch.id; saveData(); return message.reply(`Modlog → ${ch}`); }
     if (sub === 'transcripts') { const ch = message.mentions.channels.first(); if (!ch) return message.reply('`*config transcripts #ch`'); data.transcriptChannelId = ch.id; saveData(); return message.reply(`Transcripts → ${ch}`); }
     if (sub === 'jail') { const role = message.mentions.roles.first(); if (!role) return message.reply('`*config jail @role`'); data.jailRoleId = role.id; saveData(); return message.reply(`Jail → ${role}`); }
-    if (sub === 'limit') { const n = parseInt(args[0], 10); if (!n) return message.reply('`*config limit <n>`'); data.maxTicketsPerUser = n; saveData(); return message.reply(`Limit → ${n}`); }
-    if (sub === 'autoclose') { const n = parseInt(args[0], 10); if (isNaN(n) || n < 0) return message.reply('`*config autoclose <hours>`'); data.autoCloseHours = n; saveData(); return message.reply(n ? `Auto-close ${n}h` : 'Auto-close off'); }
-    return message.reply('`*config show|log|modlog|transcripts|jail|limit|autoclose`');
+    if (sub === 'limit') { data.maxTicketsPerUser = parseInt(args[0], 10) || 1; saveData(); return message.reply(`Limit → ${data.maxTicketsPerUser}`); }
+    if (sub === 'autoclose') { data.autoCloseHours = parseInt(args[0], 10) || 0; saveData(); return message.reply(data.autoCloseHours ? `Auto-close ${data.autoCloseHours}h` : 'Auto-close off'); }
+    if (sub === 'form') { data.requireForm = args[0]?.toLowerCase() !== 'off'; saveData(); return message.reply(`Ticket forms → ${data.requireForm ? 'ON' : 'OFF'}`); }
+    if (sub === 'reopen') {
+      if (args[0]?.toLowerCase() === 'off') { data.allowReopen = false; saveData(); return message.reply('Reopen OFF'); }
+      data.allowReopen = true;
+      if (args[0]) data.reopenHours = parseInt(args[0], 10) || 24;
+      saveData(); return message.reply(`Reopen ON (${data.reopenHours}h)`);
+    }
+    if (sub === 'rating') { data.ratingEnabled = args[0]?.toLowerCase() !== 'off'; saveData(); return message.reply(`Rating → ${data.ratingEnabled ? 'ON' : 'OFF'}`); }
+    return message.reply('`*config show|log|modlog|transcripts|jail|limit|autoclose|form|reopen|rating`');
   }
 
   if (command === 'channel') {
@@ -1132,7 +1411,7 @@ client.on('messageCreate', async (message) => {
       data.staffChannelId = ch.id; saveData();
       return message.reply(`Staff channel → ${ch}`);
     }
-    return message.reply(`Staff channel: ${data.staffChannelId ? `<#${data.staffChannelId}>` : 'Not set'}`);
+    return message.reply(`Staff: ${data.staffChannelId ? `<#${data.staffChannelId}>` : 'Not set'}`);
   }
 
   if (command === 'prompt') {
@@ -1147,15 +1426,15 @@ client.on('messageCreate', async (message) => {
       let np = args.join(' ').trim();
       const txt = message.attachments.find((a) => a.name?.endsWith('.txt'));
       if (txt) try { np = await fetchTextAttachment(txt.url); } catch { return message.reply('Download failed'); }
-      if (!np || np.length < 10) return message.reply('`*prompt set <text>` or attach .txt');
+      if (!np || np.length < 10) return message.reply('`*prompt set <text>` or .txt');
       data.customPrompt = np; saveData(); refreshAllConversations();
-      return message.reply(`Prompt updated (${np.length} chars)`);
+      return message.reply(`Updated (${np.length} chars)`);
     }
     if (sub === 'add') {
       const line = args.join(' ').trim();
       if (!line) return message.reply('`*prompt add <line>`');
       data.customPrompt = getActivePrompt() + '\n' + line; saveData(); refreshAllConversations();
-      return message.reply('Line added.');
+      return message.reply('Added.');
     }
     if (sub === 'reset') { data.customPrompt = null; saveData(); refreshAllConversations(); return message.reply('Reset.'); }
   }
@@ -1173,24 +1452,41 @@ client.on('messageCreate', async (message) => {
   if (command === 'category' || command === 'categories') {
     if (!isAdmin(message.member)) return message.reply('Administrator only.');
     const sub = args.shift()?.toLowerCase();
-    if (!sub || sub === 'list') return message.reply(data.categories.map((c) => `${c.emoji} **${c.label}** (\`${c.id}\`)`).join('\n') || 'None');
+    if (!sub || sub === 'list') return message.reply(data.categories.map((c) => `${c.emoji} **${c.label}** (\`${c.id}\`) form:${c.form !== false ? 'yes' : 'no'}`).join('\n'));
     if (sub === 'add') {
       const parts = args.join(' ').split('|').map((s) => s.trim());
       if (parts.length < 2) return message.reply('`*category add id | Label | emoji | description`');
       const id = parts[0].toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20);
-      data.categories.push({ id, label: parts[1], emoji: parts[2] || '🎫', description: parts[3] || parts[1] });
+      data.categories.push({ id, label: parts[1], emoji: parts[2] || '🎫', description: parts[3] || parts[1], form: true });
       saveData(); return message.reply(`Added **${parts[1]}**`);
     }
     if (sub === 'remove') {
-      const id = args[0]; if (!id) return message.reply('`*category remove <id>`');
-      data.categories = data.categories.filter((c) => c.id !== id); saveData(); return message.reply('Removed.');
+      data.categories = data.categories.filter((c) => c.id !== args[0]); saveData(); return message.reply('Removed.');
+    }
+  }
+
+  if (command === 'automod') {
+    if (!isAdmin(message.member)) return message.reply('Administrator only.');
+    const sub = args[0]?.toLowerCase();
+    if (!sub || sub === 'show') {
+      const am = data.automod;
+      return message.reply(`Link:${am.antiLink} Invite:${am.antiInvite} Spam:${am.antiSpam} Mentions:${am.maxMentions} Words:${(am.blockedWords || []).join(',') || '—'}`);
+    }
+    if (sub === 'link') { data.automod.antiLink = args[1]?.toLowerCase() !== 'off'; saveData(); return message.reply(`Link → ${data.automod.antiLink}`); }
+    if (sub === 'invite') { data.automod.antiInvite = args[1]?.toLowerCase() !== 'off'; saveData(); return message.reply(`Invite → ${data.automod.antiInvite}`); }
+    if (sub === 'spam') {
+      if (args[1] === 'off') { data.automod.antiSpam = false; saveData(); return message.reply('Spam off'); }
+      data.automod.antiSpam = true;
+      if (args[1]) data.automod.spamMessages = parseInt(args[1], 10) || 5;
+      if (args[2]) data.automod.spamSeconds = parseInt(args[2], 10) || 5;
+      saveData(); return message.reply(`Spam ON ${data.automod.spamMessages}/${data.automod.spamSeconds}s`);
     }
   }
 
   if (command === 'close' && message.channel.name?.startsWith('ticket-')) {
     await closeTicket(message.channel, message.author, args.join(' ') || 'No reason'); return;
   }
-  if ((command === 'escalate' || command === 'staffrequest') && message.channel.name?.startsWith('ticket-')) {
+  if ((command === 'escalate') && message.channel.name?.startsWith('ticket-')) {
     const ok = await escalateToStaff(message.guild, message.channel, message.author, args.join(' ') || 'Requested');
     return message.reply(ok ? 'Staff notified.' : 'Staff channel not set.');
   }
@@ -1206,16 +1502,17 @@ client.on('messageCreate', async (message) => {
     await message.channel.permissionOverwrites.delete(m.id);
     return message.reply(`Removed ${m}`);
   }
-  if (command === 'claim' && message.channel.name?.startsWith('ticket-')) {
-    if (!isStaff(message.member)) return message.reply('Staff only.');
-    const info = getTicketInfo(message.channel.id);
-    if (info) { info.claimedBy = message.author.id; saveData(); }
-    return message.channel.send({ embeds: [new EmbedBuilder().setColor(0xfee75c).setDescription(`Claimed by ${message.author}`)] });
-  }
-  if (command === 'tickets' || command === 'list') {
+  if (command === 'tickets') {
     const entries = Object.entries(data.openTickets);
     if (!entries.length) return message.reply('No open tickets.');
-    return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`Open Tickets (${entries.length})`).setDescription(entries.map(([id, t]) => `**#${t.number}** ${t.categoryLabel} <@${t.userId}> ${message.guild.channels.cache.get(id) || ''}`).join('\n').slice(0, 4000))] });
+    return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`Open Tickets (${entries.length})`).setDescription(
+      entries.map(([id, t]) => {
+        const p = PRIORITY[t.priority || 'medium'];
+        const claim = t.claimedBy ? ` · 📌 <@${t.claimedBy}>` : '';
+        const tags = t.tags?.length ? ` · [${t.tags.join(', ')}]` : '';
+        return `${p?.emoji || ''} **#${t.number}** ${t.categoryLabel} <@${t.userId}> ${message.guild.channels.cache.get(id) || ''}${claim}${tags}`;
+      }).join('\n').slice(0, 4000)
+    )] });
   }
   if (command === 'transcript' && message.channel.name?.startsWith('ticket-')) {
     const t = await generateTranscript(message.channel);
@@ -1223,79 +1520,12 @@ client.on('messageCreate', async (message) => {
   }
   if (command === 'stats') {
     return message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Stats').addFields(
-      { name: 'Tickets', value: `${Object.keys(data.openTickets).length}`, inline: true },
+      { name: 'Open tickets', value: `${Object.keys(data.openTickets).length}`, inline: true },
+      { name: 'Closed (hist)', value: `${(data.closedHistory || []).length}`, inline: true },
       { name: 'Giveaways', value: `${Object.values(data.giveaways || {}).filter((g) => !g.ended).length}`, inline: true },
       { name: 'Raid mode', value: data.raidMode ? 'ON' : 'OFF', inline: true }
     )] });
   }
-});
-
-// ─── INTERACTIONS ─────────────────────────────────────────
-client.on('interactionCreate', async (interaction) => {
-  try {
-    if (interaction.isStringSelectMenu() && interaction.customId === 'help_menu') {
-      const sec = HELP_SECTIONS[interaction.values[0]];
-      if (!sec) return interaction.reply({ content: 'Unknown section.', ephemeral: true });
-      if (sec.admin && !isAdmin(interaction.member)) return interaction.reply({ content: 'Admin only.', ephemeral: true });
-      if (sec.staff && !isStaff(interaction.member) && !isMod(interaction.member)) return interaction.reply({ content: 'Staff only.', ephemeral: true });
-      return interaction.reply({
-        embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`${sec.emoji || ''} ${sec.label}`).setDescription(sec.text)],
-        ephemeral: true,
-      });
-    }
-
-    if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category') {
-      await interaction.deferReply({ ephemeral: true });
-      await createTicket(interaction.guild, interaction.user, interaction.values[0], interaction);
-      return;
-    }
-
-    if (interaction.isButton()) {
-      if (interaction.customId === 'close_ticket') {
-        const modal = new ModalBuilder().setCustomId('close_modal').setTitle('Close Ticket');
-        modal.addComponents(new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('close_reason').setLabel('Reason').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(200)
-        ));
-        await interaction.showModal(modal);
-        return;
-      }
-      if (interaction.customId === 'escalate_ticket') {
-        await interaction.deferReply({ ephemeral: true });
-        const ok = await escalateToStaff(interaction.guild, interaction.channel, interaction.user, 'User requested staff');
-        await interaction.editReply({ content: ok ? 'Staff notified.' : 'Staff channel not set.' });
-        if (ok) await interaction.channel.send('Staff has been requested.');
-        return;
-      }
-      if (interaction.customId === 'transcript_ticket') {
-        await interaction.deferReply({ ephemeral: true });
-        const t = await generateTranscript(interaction.channel);
-        await interaction.editReply({ content: 'Transcript:', files: [new AttachmentBuilder(Buffer.from(t, 'utf-8'), { name: 'transcript.txt' })] });
-        return;
-      }
-      if (interaction.customId.startsWith('gw_enter_')) {
-        const gwId = interaction.customId.replace('gw_enter_', '');
-        const gw = data.giveaways[gwId];
-        if (!gw || gw.ended) return interaction.reply({ content: 'Giveaway ended.', ephemeral: true });
-        const member = interaction.member;
-        if (gw.requiredRoles?.length && !gw.requiredRoles.some((rid) => member.roles.cache.has(rid)))
-          return interaction.reply({ content: 'Missing required role.', ephemeral: true });
-        if (gw.blacklistRoles?.length && gw.blacklistRoles.some((rid) => member.roles.cache.has(rid)))
-          return interaction.reply({ content: 'Blacklisted role.', ephemeral: true });
-        if (!gw.entrants) gw.entrants = [];
-        if (gw.entrants.includes(member.id)) {
-          gw.entrants = gw.entrants.filter((id) => id !== member.id); saveData();
-          return interaction.reply({ content: 'You left the giveaway.', ephemeral: true });
-        }
-        gw.entrants.push(member.id); saveData();
-        return interaction.reply({ content: `Entered! Entries: **${gw.entrants.length}**`, ephemeral: true });
-      }
-    }
-
-    if (interaction.isModalSubmit() && interaction.customId === 'close_modal') {
-      await interaction.deferUpdate();
-      await closeTicket(interaction.channel, interaction.user, interaction.fields.getTextInputValue('close_reason') || 'No reason');
-    }
-  } catch (e) { console.error(e); }
 });
 
 client.login(TOKEN);
