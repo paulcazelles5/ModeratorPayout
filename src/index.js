@@ -16,13 +16,14 @@ const OpenAI = require('openai');
 // ==================== CONFIG ====================
 const TOKEN = process.env.DISCORD_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-const AI_MODEL = process.env.AI_MODEL || 'llama-3.3-70b-versatile';
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.groq.com/openai/v1';
+// Current free models on Groq (Oct 2026): openai/gpt-oss-20b , openai/gpt-oss-120b , qwen/qwen3.8-27b
+const AI_MODEL = process.env.AI_MODEL || 'openai/gpt-oss-20b';
 const PREFIX = '*';
 
 const SYSTEM_PROMPT =
   process.env.AI_SYSTEM_PROMPT ||
-  `You are a professional and friendly support assistant. You answer clearly, concisely and helpfully. If you cannot solve the problem, suggest alternative solutions. Always reply in the same language the user is writing in.`;
+  `You are a professional and friendly support assistant. You answer clearly, concisely and helpfully. If you cannot solve the problem, suggest alternative solutions. Always reply in English.`;
 
 if (!TOKEN || !OPENAI_API_KEY) {
   console.error('❌ Missing environment variables (DISCORD_TOKEN, OPENAI_API_KEY)');
@@ -63,6 +64,7 @@ async function getAIResponse(channelId, userMessage, username) {
   }
 
   try {
+    console.log(`[AI] Calling model: ${AI_MODEL}`);
     const completion = await openai.chat.completions.create({
       model: AI_MODEL,
       messages: history,
@@ -74,7 +76,10 @@ async function getAIResponse(channelId, userMessage, username) {
     history.push({ role: 'assistant', content: reply });
     return reply;
   } catch (err) {
-    console.error('AI Error:', err.message);
+    console.error('[AI Error]', err.status || '', err.message);
+    if (err.response) {
+      console.error('[AI Error body]', JSON.stringify(err.response.data || err.response, null, 2));
+    }
     return 'Sorry, I am experiencing a technical issue right now. Please try again in a moment.';
   }
 }
@@ -244,6 +249,8 @@ async function closeTicket(channel, user) {
 client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   console.log(`Prefix: ${PREFIX}`);
+  console.log(`AI Model: ${AI_MODEL}`);
+  console.log(`Base URL: ${OPENAI_BASE_URL}`);
 });
 
 // Button interactions
