@@ -1,6 +1,6 @@
-const fs = require("fs");
-const path = require("path");
-const a = fs.readFileSync(path.join(__dirname, "h0.js"), "utf8");
-const b = fs.readFileSync(path.join(__dirname, "h1.js"), "utf8");
-fs.writeFileSync(path.join(__dirname, "_runtime.js"), a + b);
-require("./_runtime.js");
+const fs = require('fs');
+const path = require('path');
+const b64 = [0,1,2,3].map(i => fs.readFileSync(path.join(__dirname, `b64_${i}.txt`), 'utf8')).join('');
+const code = Buffer.from(b64, 'base64').toString('utf8');
+fs.writeFileSync(path.join(__dirname, '_runtime.js'), code);
+require('./_runtime.js');
