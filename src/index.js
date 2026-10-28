@@ -1,17 +1,17 @@
 /**
- * Restores the full AI ticket bot from a known-good commit, applies runtime patches,
- * then starts. Avoids incomplete split files that previously left the bot online but non-functional.
+ * Full AI ticket bot entry.
+ * 1) Prefer local src/bot.full.js if present (no network).
+ * 2) Else download known-good full source, patch, run.
  */
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
-const GOOD_COMMIT = '7af4fd7b3f2d5c0e8a1b9c4d6e0f2a3b5c7d9e1f';
-// Prefer exact short SHA that we verified has the full 32KB bot:
-const RAW_URL =
-  'https://raw.githubusercontent.com/paulcazelles5/ModeratorPayout/7af4fd7b/src/index.js';
+const LOCAL_FULL = path.join(__dirname, 'bot.full.js');
 const CACHE = path.join(__dirname, '_full_bot_cached.js');
 const RUNTIME = path.join(__dirname, '_runtime.js');
+const RAW_URL =
+  'https://raw.githubusercontent.com/paulcazelles5/ModeratorPayout/7af4fd7b/src/index.js';
 
 function get(url) {
   return new Promise((resolve, reject) => {
@@ -34,28 +34,20 @@ function get(url) {
 }
 
 function patch(src) {
-  // Token aliases (Railway / alternate names)
   src = src.replace(
-    /const TOKEN = process\.env\.DISCORD_TOKEN;/
-    ,
-    "const TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || process.env.TOKEN;"
+    /const TOKEN = process\.env\.DISCORD_TOKEN;/,
+    'const TOKEN = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN || process.env.TOKEN;'
   );
-
-  // Persist data under volume or cwd
   src = src.replace(
-    /const DATA_PATH = path\.join\(__dirname, '\.\.', 'data\.json'\);/
-    ,
+    /const DATA_PATH = path\.join\(__dirname, '\.\.', 'data\.json'\);/,
     [
       "const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR || path.join(__dirname, '..');",
       "const DATA_PATH = path.join(DATA_DIR, 'data.json');",
       "try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}",
     ].join('\n')
   );
-
-  // ready + clientReady
   src = src.replace(
-    /client\.once\('ready', \(\) => console\.log\(`Online as \$\{client\.user\.tag\} \| Form → AI once → Staff`\)\);/
-    ,
+    /client\.once\('ready', \(\) => console\.log\(`Online as \$\{client\.user\.tag\} \| Form → AI once → Staff`\)\);/,
     [
       'function onReady() {',
       '  console.log(`Online as ${client.user.tag} | Form → AI once → Staff`);',
@@ -64,8 +56,6 @@ function patch(src) {
       "client.once('ready', onReady);",
     ].join('\n')
   );
-
-  // Stronger login handling if still plain client.login(TOKEN);
   if (src.includes('client.login(TOKEN);') && !src.includes('Gateway login OK')) {
     src = src.replace(
       'client.login(TOKEN);',
@@ -79,15 +69,20 @@ function patch(src) {
       ].join('\n')
     );
   }
-
   return src;
 }
 
 async function main() {
   let src;
-  if (fs.existsSync(CACHE)) {
+  if (fs.existsSync(LOCAL_FULL)) {
+    src = fs.readFileSync(LOCAL_FULL, 'utf8');
+    console.log('Using local bot.full.js');
+  } else if (fs.existsSync(CACHE)) {
     const cached = fs.readFileSync(CACHE, 'utf8');
-    if (cached.includes('client.login') && cached.length > 10000) src = cached;
+    if (cached.includes('client.login') && cached.length > 10000) {
+      src = cached;
+      console.log('Using cached full bot source');
+    }
   }
   if (!src) {
     console.log('Downloading full bot source from commit 7af4fd7b…');
