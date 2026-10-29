@@ -250,6 +250,7 @@ async function trackDestructiveAction(guild, actionType, actionLabel) {
 }
 
 client.on('guildMemberAdd', async member => {
+  if (member.user.bot) trackDestructiveAction(member.guild, AuditLogEvent.BotAdd, 'Bot added').catch(() => {});
   const protection = data.protection || {};
   if (protection.antiRaidEnabled === false || member.user.bot || isWhitelisted(member.id)) return;
   const now = Date.now(); const windowMs = Number(protection.raidWindowMs) || 10000; const threshold = Number(protection.raidThreshold) || 8;
@@ -262,6 +263,16 @@ client.on('guildMemberAdd', async member => {
 client.on('channelDelete', channel => { if (channel.guild) trackDestructiveAction(channel.guild, AuditLogEvent.ChannelDelete, 'Channel deleted').catch(() => {}); });
 client.on('roleDelete', role => { if (role.guild) trackDestructiveAction(role.guild, AuditLogEvent.RoleDelete, 'Role deleted').catch(() => {}); });
 client.on('guildBanAdd', ban => { trackDestructiveAction(ban.guild, AuditLogEvent.MemberBanAdd, 'Member banned').catch(() => {}); });
+client.on('webhookUpdate', channel => { if (channel.guild) trackDestructiveAction(channel.guild, AuditLogEvent.WebhookCreate, 'Webhook created or changed').catch(() => {}); });
+client.on('guildMemberRemove', async member => {
+  try {
+    const logs = await member.guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 1 });
+    const entry = logs.entries.first();
+    if (entry && entry.target?.id === member.id && Date.now() - entry.createdTimestamp < 8000) {
+      await trackDestructiveAction(member.guild, AuditLogEvent.MemberKick, 'Member kicked');
+    }
+  } catch {}
+});
 
 client.once('ready', () => {
   console.log(`Online as ${client.user.tag} | Full ticket bot + protection`);
