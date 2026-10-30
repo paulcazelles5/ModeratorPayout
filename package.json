@@ -1,9 +1,14 @@
 {
   "name": "payout-central-bot",
   "version": "2.0.0",
+  "description": "Payout Central bot - tickets AI, moderation, giveaways, protection",
   "main": "src/index.js",
-  "scripts": { "start": "node src/index.js" },
-  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
