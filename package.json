@@ -1,18 +1,14 @@
 {
-  "name": "ai-ticket-bot",
-  "version": "1.2.0",
-  "description": "Fully AI-powered Discord ticket bot - no staff needed",
+  "name": "payout-central-bot",
+  "version": "2.0.0",
+  "description": "Payout Central - tickets, moderation, giveaways, protection",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "start": "node src/index.js"
   },
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["discord", "ticket", "bot", "ai", "support"],
-  "author": "paulcazelles5",
-  "license": "MIT",
   "dependencies": {
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
