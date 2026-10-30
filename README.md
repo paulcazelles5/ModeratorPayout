@@ -1,25 +1,11 @@
 # Payout Central Bot
 
-## Railway deploy
+Discord bot: AI tickets (form-first, one AI reply), moderation, giveaways, anti-raid/nuke/spam/honeypot.
 
-1. Root directory: repo root
-2. Start command: `node src/index.js`
-3. Env vars:
-   - `DISCORD_TOKEN`
-   - `OPENAI_API_KEY` (Groq key)
-   - Optional: `OPENAI_BASE_URL=https://api.groq.com/openai/v1`
-   - Optional: `AI_MODEL=openai/gpt-oss-20b`
+## Railway
 
-## After deploy
+Env: DISCORD_TOKEN, GROQ_API_KEY
+Start: node src/index.js
 
-```
-*panel
-*channel log #logs
-*channel modlog #mod-logs
-*prompt reset
-*staff add @role
-```
-
-## If bot is broken
-
-Replace `src/index.js` with the full repaired file from the repair package (REPAIR_index.js renamed to index.js).
+Prefix *
+*panel *help *prompt *giveaway *antiraid *antinuke *channel log
