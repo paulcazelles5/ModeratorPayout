@@ -261,6 +261,10 @@ function isMod(m) {
 }
 function getTicketInfo(id) { return data.openTickets[id] || null; }
 
+function countUserTickets(userId) {
+  return Object.values(data.openTickets || {}).filter((t) => t.userId === userId).length;
+}
+
 function isWhitelisted(member) {
   if (!member) return false;
   if ((data.whitelistUserIds || []).includes(member.id)) return true;
