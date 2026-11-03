@@ -980,22 +980,28 @@ async function closeTicket(channel, user, reason = 'No reason provided', options
   conversations.delete(channel.id);
 }
 
-async function deleteTicket(channel, user) {
-  const info = getTicketInfo(channel.id);
-  if (!isStaff(user) && !isMod(user) && !isAdmin(user)) {
-    return channel.send('Only staff can delete tickets.');
+async function deleteTicket(channel, userOrMember) {
+  // Accept User or GuildMember
+  let member = userOrMember;
+  if (!member?.permissions && channel.guild) {
+    member = channel.guild.members.cache.get(userOrMember.id) || await channel.guild.members.fetch(userOrMember.id).catch(() => null);
   }
+  if (!isStaff(member) && !isMod(member) && !isAdmin(member)) {
+    return channel.send('Only staff can delete tickets.').catch(() => {});
+  }
+  const info = getTicketInfo(channel.id);
+  const tag = member?.user?.tag || userOrMember.tag || userOrMember.id;
   await sendLog(channel.guild, new EmbedBuilder()
     .setColor(0x992d22)
     .setTitle('Ticket Deleted')
-    .setDescription(`**#${info?.number || channel.name}** deleted by ${user.tag}`)
-  );
+    .setDescription(`**#${info?.number || channel.name}** deleted by ${tag}`)
+  ).catch(() => {});
   if (info) {
     delete data.openTickets[channel.id];
     saveData();
   }
   conversations.delete(channel.id);
-  await channel.send('Deleting ticket...');
+  await channel.send('Deleting ticket...').catch(() => {});
   setTimeout(() => channel.delete().catch(() => {}), 1500);
 }
 
@@ -1348,8 +1354,8 @@ client.on('interactionCreate', async (interaction) => {
         if (!isStaff(interaction.member) && !isMod(interaction.member) && !isAdmin(interaction.member)) {
           return interaction.reply({ content: 'Only staff can delete tickets.', ephemeral: true });
         }
-        await interaction.deferUpdate();
-        await deleteTicket(interaction.channel, interaction.user);
+        await interaction.deferUpdate().catch(() => {});
+        await deleteTicket(interaction.channel, interaction.member || interaction.user);
         return;
       }
 
